@@ -1,0 +1,20 @@
+================================================================================
+KRYPTON DRIVE – SUBMISSION (fill and upload to GitHub)
+================================================================================
+
+GITHUB REPOSITORIES
+-------------------
+Frontend:  https://github.com/YOUR_USERNAME/googledrive-frontend
+Backend:   https://github.com/YOUR_USERNAME/googledrive-backend
+
+DEPLOYED URLS
+-------------
+Frontend:  https://your-frontend-app.vercel.app
+Backend:   https://googledrive-backend.domain.app
+
+LAST COMMITTED HASH IDs
+-----------------------
+Frontend (googledrive-frontend):  
+Backend (googledrive-backend):    
+
+================================================================================
