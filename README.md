@@ -36,14 +36,12 @@ Optional with defaults: `PORT`, `NODE_ENV`, `JWT_EXPIRES_IN`, `SMTP_PORT`, `FRON
 
 1. Copy `.env.example` to `.env` and set:
    - `MONGODB_URI`
-   - `JWT_SECRET`, `JWT_REFRESH_SECRET`
+   - `JWT_SECRET`
    - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET_NAME`
    - `SMTP_*` for activation and password-reset emails
    - `FRONTEND_URL` for CORS and email links
 2. `npm install`
 3. `npm run dev` (or `npm start`)
-
-See project root `AWS_S3_SETUP_AND_REQUIREMENTS.md` for S3 and IAM setup.
 
 ## API (high level)
 
