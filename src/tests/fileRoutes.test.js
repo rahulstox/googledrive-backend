@@ -90,6 +90,8 @@ vi.mock("../models/File.js", () => {
   });
   MockFile.sort = vi.fn().mockReturnThis();
   MockFile.lean = vi.fn().mockReturnThis();
+  MockFile.exists = vi.fn().mockResolvedValue(false);
+  MockFile.updateMany = vi.fn().mockResolvedValue({ modifiedCount: 1 });
 
   return { default: MockFile };
 });
@@ -241,5 +243,77 @@ describe("File Routes", () => {
     // Note: supertest might not handle streams perfectly with mocks, but status code should be 200 or 206
     expect(res.statusCode).toBeOneOf([200, 206]);
     expect(res.header["content-type"]).toContain("text/plain");
+  });
+
+  describe("POST /api/files/bulk-star", () => {
+    it("should star all selected files if some are unstarred", async () => {
+      const ids = ["id1", "id2"];
+      const items = [
+        { _id: "id1", isStarred: true, userId: "test_user_id" },
+        { _id: "id2", isStarred: false, userId: "test_user_id" },
+      ];
+      File.find.mockResolvedValue(items);
+
+      const res = await request(app).post("/api/files/bulk-star").send({ ids });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.status).toBe(true);
+      expect(res.body.message).toContain("Added to Starred");
+      expect(File.updateMany).toHaveBeenCalledWith(
+        { _id: { $in: ids }, userId: "test_user_id" },
+        { $set: { isStarred: true } },
+      );
+    });
+
+    it("should unstar all selected files if all are starred", async () => {
+      const ids = ["id1", "id2"];
+      const items = [
+        { _id: "id1", isStarred: true, userId: "test_user_id" },
+        { _id: "id2", isStarred: true, userId: "test_user_id" },
+      ];
+      File.find.mockResolvedValue(items);
+
+      const res = await request(app).post("/api/files/bulk-star").send({ ids });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.status).toBe(false);
+      expect(res.body.message).toContain("Removed from Starred");
+      expect(File.updateMany).toHaveBeenCalledWith(
+        { _id: { $in: ids }, userId: "test_user_id" },
+        { $set: { isStarred: false } },
+      );
+    });
+  });
+
+  describe("POST /api/files/:id/move", () => {
+    it("should preserve starred status when moving a file", async () => {
+      const fileToMove = {
+        ...mockFile,
+        _id: "file_id_move",
+        isStarred: true,
+        s3Key: "old/path/file.txt",
+        save: vi.fn().mockResolvedValue(true),
+      };
+      const destinationFolder = {
+        ...mockFile,
+        _id: "folder_id_dest",
+        type: "folder",
+        s3Key: "new/path",
+      };
+
+      File.findOne
+        .mockResolvedValueOnce(fileToMove) // Find item
+        .mockResolvedValueOnce(destinationFolder) // Find destination
+        .mockResolvedValueOnce(null); // Check collision
+
+      const res = await request(app)
+        .post("/api/files/file_id_move/move")
+        .send({ parentId: "folder_id_dest" });
+
+      expect(res.statusCode).toBe(200);
+      expect(fileToMove.isStarred).toBe(true);
+      expect(fileToMove.parentId).toBe("folder_id_dest");
+      expect(fileToMove.save).toHaveBeenCalled();
+    });
   });
 });

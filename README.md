@@ -1,93 +1,61 @@
 # Drive Backend
 
-Node.js/Express backend for the Drive application. Handles authentication, file management, and S3 interactions.
+Node.js backend for the Drive (Google Drive–style) application: auth, file/folder metadata in MongoDB Atlas, and file storage in AWS S3.
 
 ## Features
 
-- **Authentication**:
-  - JWT-based Auth with Access Tokens.
-  - Secure Password Hashing (Bcrypt).
-  - Email Activation Flow (Nodemailer).
-  - Secure Forgot/Reset Password flows (Token-based).
-- **File System**:
-  - **Storage**: Private AWS S3 Bucket.
-  - **Uploads**: Multipart/form-data support (Multer) with streaming directly to S3.
-  - **Downloads**: Secure Presigned URLs (Time-limited access).
-  - **Organization**: Recursive folder structures, Soft Delete (Trash), and Restoration.
-- **Security**:
-  - Helmet (Headers), CORS, Rate Limiting.
-  - Input Validation (Express Validator).
-  - Ownership checks on all resources.
+- **Auth**: Register, two-step activation (email link), login (activated users only), forgot password, reset password.
+- **Users**: Email (unique), first name, last name, encrypted password.
+- **Files**: Create folder, upload file (multipart), list by parent, download (presigned URL), delete. Metadata in MongoDB; binaries in private S3 bucket.
 
-## Tech Stack
+## Tech
 
-- **Runtime**: Node.js (ES Modules)
-- **Framework**: Express.js
-- **Database**: MongoDB Atlas (Mongoose ODM)
-- **Storage**: AWS S3 SDK v3
-- **Tools**: `multer-s3`, `nodemailer`, `node-cron`
+- Node.js (ES modules), Express
+- MongoDB Atlas (Mongoose)
+- AWS S3 (SDK v3, presigned URLs)
+- JWT, bcrypt, express-validator, helmet, rate-limit, nodemailer
 
-## Setup & Installation
+## Environment verification
 
-### 1. Prerequisites
-- Node.js (v16+)
-- MongoDB Connection String (Atlas or Local)
-- AWS S3 Bucket (Private) & IAM Credentials
+On startup the server validates (without logging secrets):
 
-### 2. Install Dependencies
-```bash
-npm install
-```
+- **Required**: `MONGODB_URI`, `JWT_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET_NAME`, `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`
+- **JWT_SECRET**: must be at least 32 characters
+- **MONGODB_URI**: must start with `mongodb://` or `mongodb+srv://`
+- **FRONTEND_URL**: must be a valid http/https URL
+- **SMTP_PORT**: must be 1–65535
 
-### 3. Environment Configuration
-Create a `.env` file in the root directory:
+Optional with defaults: `PORT`, `NODE_ENV`, `JWT_EXPIRES_IN`, `SMTP_PORT`, `FRONTEND_URL`, `EMAIL_FROM`.
 
-```env
-PORT=5000
-NODE_ENV=development
-FRONTEND_URL=http://localhost:5173
+**Health checks:**
 
-# Database
-MONGODB_URI=mongodb+srv://<user>:<pass>@cluster.mongodb.net/drive
+- `GET /health` — always returns `{ status: 'ok' }` if the process is up
+- `GET /ready` — returns `{ ok, mongodb, s3 }`; `ok` is true only when MongoDB is connected and S3 bucket is reachable (validates full setup)
 
-# JWT
-JWT_SECRET=your_super_secret_key_min_32_chars
-JWT_EXPIRES_IN=7d
+## Setup
 
-# AWS S3
-AWS_ACCESS_KEY_ID=your_access_key
-AWS_SECRET_ACCESS_KEY=your_secret_key
-AWS_REGION=us-east-1
-S3_BUCKET_NAME=your-bucket-name
+1. Copy `.env.example` to `.env` and set:
+   - `MONGODB_URI`
+   - `JWT_SECRET`
+   - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET_NAME`
+   - `SMTP_*` for activation and password-reset emails
+   - `FRONTEND_URL` for CORS and email links
+2. `npm install`
+3. `npm run dev` (or `npm start`)
 
-# Email (SMTP)
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=your_email@gmail.com
-SMTP_PASS=your_app_password
-EMAIL_FROM=noreply@drive.com
-```
+## API (high level)
 
-### 4. Run Server
-- **Development**:
-  ```bash
-  npm run dev
-  ```
-- **Production**:
-  ```bash
-  npm start
-  ```
+- `POST /api/auth/register` — register (inactive until activation)
+- `GET /api/auth/activate/:token` — activate account
+- `POST /api/auth/login` — login (activated only)
+- `POST /api/auth/forgot-password` — send reset email
+- `POST /api/auth/reset-password/:token` — set new password
+- `GET /api/auth/me` — current user (Bearer token)
+- `GET /api/files?parentId=...` — list files/folders
+- `POST /api/files/folder` — create folder
+- `POST /api/files/upload` — upload file (multipart)
+- `GET /api/files/download/:id` — get presigned download URL
+- `DELETE /api/files/:id` — delete file or folder
+Rahul - [GitHub Profile](https://github.com/rahulstox)
 
-## API Documentation
-
-The API runs at `/api` (e.g., `http://localhost:5000/api`).
-
-- **Auth**: `/auth/register`, `/auth/login`, `/auth/activate/:token`, `/auth/forgot-password`
-- **Files**: `/files`, `/files/upload`, `/files/folder`, `/files/download/:id`, `/files/trash`
-
-## Testing
-
-Run unit and integration tests:
-```bash
-npm test
-```
+Project Link: [https://github.com/rahulstox/googledrive-backend](https://github.com/rahulstox/googledrive-backend)

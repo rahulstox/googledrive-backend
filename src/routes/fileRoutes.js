@@ -200,7 +200,26 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       currentKey = folder.s3Key;
     }
 
-    const s3Key = `${currentKey}/${safeFileName}`.replace(/\/+/g, "/");
+    let finalFileName = relFileName;
+    let s3Key = `${currentKey}/${safeFileName}`.replace(/\/+/g, "/");
+
+    // Handle duplicate filenames
+    let counter = 1;
+    while (await File.exists({ s3Key })) {
+      const dotIndex = relFileName.lastIndexOf(".");
+      let base, ext;
+      if (dotIndex > 0) {
+        base = relFileName.substring(0, dotIndex);
+        ext = relFileName.substring(dotIndex);
+      } else {
+        base = relFileName;
+        ext = "";
+      }
+      finalFileName = `${base} (${counter})${ext}`;
+      const newSafeName = finalFileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+      s3Key = `${currentKey}/${newSafeName}`.replace(/\/+/g, "/");
+      counter++;
+    }
 
     // File is already uploaded to temp location by multer-s3
     const tempKey = req.file.key;
@@ -210,7 +229,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     await deleteFromS3(tempKey);
 
     const file = await File.create({
-      name: relFileName,
+      name: finalFileName,
       type: "file",
       s3Key,
       size: req.file.size,
@@ -659,6 +678,41 @@ router.post("/bulk-delete", async (req, res) => {
     res.json({ message: "Moved to trash.", count });
   } catch (err) {
     res.status(500).json({ message: err.message || "Bulk delete failed." });
+  }
+});
+
+router.post("/bulk-star", async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "ids array is required." });
+    }
+
+    const items = await File.find({
+      _id: { $in: ids },
+      userId: req.user.id,
+    });
+
+    if (items.length === 0) {
+      return res.json({ message: "No items found." });
+    }
+
+    // Smart toggle: if any item is NOT starred, star them all.
+    // If all are starred, unstar them all.
+    const anyUnstarred = items.some((item) => !item.isStarred);
+    const newStatus = anyUnstarred;
+
+    await File.updateMany(
+      { _id: { $in: ids }, userId: req.user.id },
+      { $set: { isStarred: newStatus } }
+    );
+
+    res.json({
+      message: newStatus ? "Added to Starred" : "Removed from Starred",
+      status: newStatus,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message || "Bulk star failed." });
   }
 });
 

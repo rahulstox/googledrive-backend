@@ -1,37 +1,49 @@
-import mongoose from 'mongoose';
-import bcrypt from 'bcryptjs';
+import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 const userSchema = new mongoose.Schema(
   {
     email: {
       type: String,
-      required: [true, 'Email is required'],
       unique: true,
       lowercase: true,
       trim: true,
-      match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email'],
+      match: [/^\S+@\S+\.\S+$/, "Please provide a valid email"],
+      sparse: true,
+    },
+    phoneNumber: {
+      type: String,
+      unique: true,
+      sparse: true,
     },
     firstName: {
       type: String,
-      required: [true, 'First name is required'],
       trim: true,
-      maxlength: [50, 'First name cannot exceed 50 characters'],
+      maxlength: [50, "First name cannot exceed 50 characters"],
+      default: "User",
     },
     lastName: {
       type: String,
-      required: [true, 'Last name is required'],
       trim: true,
-      maxlength: [50, 'Last name cannot exceed 50 characters'],
+      maxlength: [50, "Last name cannot exceed 50 characters"],
+      default: "",
     },
     password: {
       type: String,
-      required: [true, 'Password is required'],
-      minlength: [8, 'Password must be at least 8 characters'],
+      minlength: [8, "Password must be at least 8 characters"],
       select: false,
+    },
+    googleId: { type: String, unique: true, sparse: true },
+    githubId: { type: String, unique: true, sparse: true },
+    authProvider: {
+      type: String,
+      enum: ["email", "google", "github", "phone"],
+      default: "email",
     },
     isActive: {
       type: Boolean,
-      default: false,
+      default: true,
     },
     activationToken: {
       type: String,
@@ -41,12 +53,9 @@ const userSchema = new mongoose.Schema(
       type: Date,
       select: false,
     },
-    passwordResetToken: {
-      type: String,
-      select: false,
-    },
-    passwordResetExpires: {
-      type: Date,
+    tokenVersion: {
+      type: Number,
+      default: 0,
       select: false,
     },
     trashRetentionDays: {
@@ -56,18 +65,29 @@ const userSchema = new mongoose.Schema(
       max: 365,
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
-userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
+userSchema.pre("save", async function (next) {
+  if (!this.isModified("password") || !this.password) return next();
   const salt = await bcrypt.genSalt(12);
   this.password = await bcrypt.hash(this.password, salt);
   next();
 });
 
 userSchema.methods.comparePassword = async function (candidatePassword) {
+  if (!this.password) return false;
   return bcrypt.compare(candidatePassword, this.password);
 };
 
-export default mongoose.model('User', userSchema);
+userSchema.methods.getSignedJwtToken = function () {
+  return jwt.sign(
+    { id: this._id, v: this.tokenVersion },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: process.env.JWT_EXPIRE || "7d",
+    },
+  );
+};
+
+export default mongoose.model("User", userSchema);

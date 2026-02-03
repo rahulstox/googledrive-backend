@@ -1,28 +1,30 @@
-import mongoose from 'mongoose';
+import mongoose from "mongoose";
 
 const passwordResetSchema = new mongoose.Schema(
   {
     userId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
+      ref: "User",
       required: true,
     },
-    token: {
+    tokenHash: {
       type: String,
       required: true,
-      unique: true,
     },
     expiresAt: {
       type: Date,
       required: true,
-      index: { expireAfterSeconds: 0 },
+      index: { expireAfterSeconds: 0 }, // TTL index
     },
-    used: {
+    consumed: {
       type: Boolean,
       default: false,
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
-export default mongoose.model('PasswordResetToken', passwordResetSchema);
+// Compound index for faster lookups if needed, though usually looked up by tokenHash (if unique) or userId
+passwordResetSchema.index({ tokenHash: 1 });
+
+export default mongoose.model("PasswordResetToken", passwordResetSchema);

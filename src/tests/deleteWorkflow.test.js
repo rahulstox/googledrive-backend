@@ -5,6 +5,16 @@ import { cleanupTrash } from "../services/cronService.js";
 import { softDeleteFile } from "../services/fileService.js";
 
 // Mock dependencies
+vi.mock("multer-s3", () => ({
+  default: vi.fn().mockReturnValue({
+    _handleFile: (req, file, cb) => {
+      file.key = "mock/key";
+      cb(null, { key: "mock/key", location: "mock-location" });
+    },
+    _removeFile: (req, file, cb) => cb(null),
+  }),
+}));
+
 vi.mock("../middleware/auth.js", () => ({
   protect: (req, res, next) => {
     req.user = { id: "user_id" };
@@ -16,6 +26,7 @@ vi.mock("../services/s3Service.js", () => ({
   deleteFromS3: vi.fn().mockResolvedValue(true),
   getS3Key: vi.fn().mockReturnValue("mock/key"),
   checkS3Connection: vi.fn().mockResolvedValue(true),
+  s3Client: { send: vi.fn() },
 }));
 
 // Mock Mongoose Models
