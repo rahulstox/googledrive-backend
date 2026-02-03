@@ -36,11 +36,24 @@ const fileSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    isStarred: {
+      type: Boolean,
+      default: false,
+    },
+    isTrash: {
+      type: Boolean,
+      default: false,
+    },
+    trashedAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
-fileSchema.index({ userId: 1, parentId: 1 });
+fileSchema.index({ userId: 1, parentId: 1, isTrash: 1 });
 fileSchema.index({ userId: 1, type: 1 });
+fileSchema.index({ userId: 1, isStarred: 1 });
 
 export default mongoose.model('File', fileSchema);

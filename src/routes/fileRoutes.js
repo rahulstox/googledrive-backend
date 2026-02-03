@@ -1,5 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
+import multerS3 from "multer-s3";
 import File from "../models/File.js";
 import { protect } from "../middleware/auth.js";
 import {
@@ -9,14 +10,57 @@ import {
   getObjectStream,
   deleteFromS3,
   copyInS3,
+  s3Client,
 } from "../services/s3Service.js";
+import {
+  softDeleteFile,
+  restoreFile,
+  deleteFilePermanently,
+} from "../services/fileService.js";
 
 const router = Router();
 router.use(protect);
 
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 },
+  storage: multerS3({
+    s3: s3Client,
+    bucket: process.env.S3_BUCKET_NAME,
+    contentType: multerS3.AUTO_CONTENT_TYPE,
+    acl: "private",
+    key: function (req, file, cb) {
+      const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+      // Upload to a temp folder
+      cb(null, `temp/${req.user.id}/${uniqueSuffix}-${file.originalname}`);
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 * 1024 }, // 5GB limit
+  fileFilter: (req, file, cb) => {
+    // Allow all file types
+    cb(null, true);
+  },
+});
+
+router.get("/search", async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || !q.trim()) {
+      return res.json({ items: [] });
+    }
+
+    const items = await File.find({
+      userId: req.user.id,
+      name: { $regex: q.trim(), $options: "i" },
+      isTrash: false,
+    })
+      .sort({ updatedAt: -1 })
+      .limit(50) // Limit results for performance
+      .lean();
+
+    res.json({ items });
+  } catch (err) {
+    console.error("Search error:", err);
+    res.status(500).json({ message: "Search failed." });
+  }
 });
 
 router.get("/", async (req, res) => {
@@ -25,6 +69,7 @@ router.get("/", async (req, res) => {
     const items = await File.find({
       userId: req.user.id,
       parentId: parentId === "root" || parentId === "" ? null : parentId,
+      isTrash: false,
     })
       .sort({ type: 1, name: 1 })
       .lean();
@@ -120,7 +165,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     const rootPrefix = `users/${req.user.id}`;
     const baseKey = (parentDoc ? parentDoc.s3Key : rootPrefix).replace(
       /\/+$/g,
-      ""
+      "",
     );
 
     const parts = rel ? rel.split("/").filter((p) => p && p !== ".") : [];
@@ -156,18 +201,34 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     }
 
     const s3Key = `${currentKey}/${safeFileName}`.replace(/\/+/g, "/");
-    await uploadToS3(s3Key, req.file.buffer, req.file.mimetype);
+
+    // File is already uploaded to temp location by multer-s3
+    const tempKey = req.file.key;
+
+    // Move from temp to final location
+    await copyInS3(tempKey, s3Key);
+    await deleteFromS3(tempKey);
+
     const file = await File.create({
       name: relFileName,
       type: "file",
       s3Key,
       size: req.file.size,
-      mimeType: req.file.mimetype,
+      mimeType: req.file.mimetype || req.file.contentType,
       parentId: currentParentId,
       userId: req.user.id,
     });
     res.status(201).json(file);
   } catch (err) {
+    // If we fail after upload but before DB save, try to clean up temp file
+    if (req.file && req.file.key) {
+      try {
+        await deleteFromS3(req.file.key);
+      } catch (e) {
+        console.error("Cleanup failed", e);
+      }
+    }
+    console.error("Upload error:", err);
     res.status(500).json({ message: "Upload failed." });
   }
 });
@@ -189,14 +250,31 @@ router.get("/stream/:id", async (req, res) => {
         .send("Cannot stream a folder.");
       return;
     }
-    const { body, contentType } = await getObjectStream(file.s3Key);
+
+    const range = req.headers.range;
+    const { body, contentType, contentLength, contentRange, acceptRanges } =
+      await getObjectStream(file.s3Key, range);
+
     const filename = file.name.replace(/[^\w.\- ]/g, "_");
     const disposition = req.query.download === "1" ? "attachment" : "inline";
-    res.set({
+
+    const headers = {
       "Content-Type":
         file.mimeType || contentType || "application/octet-stream",
       "Content-Disposition": `${disposition}; filename="${filename}"`,
-    });
+      "Accept-Ranges": acceptRanges || "bytes",
+    };
+
+    if (contentRange) {
+      headers["Content-Range"] = contentRange;
+      headers["Content-Length"] = contentLength;
+      res.status(206);
+    } else {
+      headers["Content-Length"] = contentLength;
+      res.status(200);
+    }
+
+    res.set(headers);
     body.pipe(res);
     body.on("error", (err) => {
       if (!res.headersSent)
@@ -231,6 +309,73 @@ router.get("/download/:id", async (req, res) => {
     res.json({ url, name: file.name });
   } catch (err) {
     res.status(500).json({ message: "Failed to get download link." });
+  }
+});
+
+router.get("/starred", async (req, res) => {
+  try {
+    const items = await File.find({
+      userId: req.user.id,
+      isStarred: true,
+      isTrash: false,
+    })
+      .sort({ updatedAt: -1 })
+      .lean();
+    res.json({ items });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to list starred files." });
+  }
+});
+
+router.get("/trash", async (req, res) => {
+  try {
+    const items = await File.find({
+      userId: req.user.id,
+      isTrash: true,
+    })
+      .sort({ trashedAt: -1 })
+      .lean();
+    res.json({ items });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to list trash files." });
+  }
+});
+
+router.patch("/:id/star", async (req, res) => {
+  try {
+    const item = await File.findOne({
+      _id: req.params.id,
+      userId: req.user.id,
+    });
+    if (!item) return res.status(404).json({ message: "Not found" });
+    item.isStarred = !item.isStarred;
+    await item.save();
+    res.json(item);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to toggle star" });
+  }
+});
+
+router.patch("/:id/trash", async (req, res) => {
+  try {
+    const item = await File.findOne({
+      _id: req.params.id,
+      userId: req.user.id,
+    });
+    if (!item) return res.status(404).json({ message: "Not found" });
+
+    // Toggle trash status
+    if (!item.isTrash) {
+      await softDeleteFile(item._id, req.user.id);
+    } else {
+      await restoreFile(item._id, req.user.id);
+    }
+
+    // Fetch updated item to return
+    const updated = await File.findOne({ _id: item._id, userId: req.user.id });
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to toggle trash" });
   }
 });
 
@@ -340,7 +485,7 @@ router.post("/:id/move", async (req, res) => {
     const keyToParentId = new Map();
     keyToParentId.set(newBaseKey, newParent?._id || null);
     for (const { doc, newKey } of updates.sort((a, b) =>
-      a.newKey.localeCompare(b.newKey)
+      a.newKey.localeCompare(b.newKey),
     )) {
       const parentPath = newKey.split("/").slice(0, -1).join("/");
       doc.s3Key = newKey;
@@ -461,30 +606,41 @@ router.post("/upload-zip", upload.single("file"), async (req, res) => {
 
 router.delete("/:id", async (req, res) => {
   try {
-    const item = await File.findOne({
-      _id: req.params.id,
-      userId: req.user.id,
-    });
-    if (!item) {
-      return res.status(404).json({ message: "Not found." });
+    console.log("DELETE /:id hit. Params:", req.params, "User:", req.user);
+    const success = await deleteFilePermanently(req.params.id, req.user.id);
+    if (!success) {
+      return res.status(404).json({ message: "File not found." });
     }
-    if (item.type === "folder") {
-      const escapedKey = item.s3Key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const children = await File.find({
-        userId: req.user.id,
-        $or: [{ parentId: item._id }, { s3Key: new RegExp(`^${escapedKey}/`) }],
-      });
-      for (const c of children) {
-        if (c.type === "file") await deleteFromS3(c.s3Key);
-        await File.deleteOne({ _id: c._id });
-      }
-    } else {
-      await deleteFromS3(item.s3Key);
-    }
-    await File.deleteOne({ _id: item._id });
-    res.json({ message: "Deleted." });
+    res.json({ message: "Permanently deleted." });
   } catch (err) {
+    console.error("DELETE /:id error:", err);
     res.status(500).json({ message: err.message || "Delete failed." });
+  }
+});
+
+router.post("/restore/:id", async (req, res) => {
+  try {
+    const success = await restoreFile(req.params.id, req.user.id);
+    if (!success) {
+      return res.status(404).json({ message: "File not found." });
+    }
+    res.json({ message: "Restored." });
+  } catch (err) {
+    res.status(500).json({ message: err.message || "Restore failed." });
+  }
+});
+
+router.delete("/permanent/:id", async (req, res) => {
+  try {
+    const success = await deleteFilePermanently(req.params.id, req.user.id);
+    if (!success) {
+      return res.status(404).json({ message: "File not found." });
+    }
+    res.json({ message: "Permanently deleted." });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ message: err.message || "Permanent delete failed." });
   }
 });
 
@@ -494,33 +650,68 @@ router.post("/bulk-delete", async (req, res) => {
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ message: "ids array is required." });
     }
-    let deleted = 0;
+    let count = 0;
     for (const id of ids) {
-      const item = await File.findOne({ _id: id, userId: req.user.id });
-      if (!item) continue;
-      if (item.type === "folder") {
-        const escapedKey = item.s3Key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const children = await File.find({
-          userId: req.user.id,
-          $or: [
-            { parentId: item._id },
-            { s3Key: new RegExp(`^${escapedKey}/`) },
-          ],
-        });
-        for (const c of children) {
-          if (c.type === "file") await deleteFromS3(c.s3Key);
-          await File.deleteOne({ _id: c._id });
-          deleted++;
-        }
-      } else {
-        await deleteFromS3(item.s3Key);
+      if (await softDeleteFile(id, req.user.id)) {
+        count++;
       }
-      await File.deleteOne({ _id: item._id });
-      deleted++;
     }
-    res.json({ message: "Deleted.", count: deleted });
+    res.json({ message: "Moved to trash.", count });
   } catch (err) {
     res.status(500).json({ message: err.message || "Bulk delete failed." });
+  }
+});
+
+router.post("/trash/bulk-restore", async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "ids array is required." });
+    }
+    let count = 0;
+    for (const id of ids) {
+      if (await restoreFile(id, req.user.id)) {
+        count++;
+      }
+    }
+    res.json({ message: "Restored.", count });
+  } catch (err) {
+    res.status(500).json({ message: err.message || "Bulk restore failed." });
+  }
+});
+
+router.delete("/trash/bulk-permanent", async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "ids array is required." });
+    }
+    let count = 0;
+    for (const id of ids) {
+      if (await deleteFilePermanently(id, req.user.id)) {
+        count++;
+      }
+    }
+    res.json({ message: "Permanently deleted.", count });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ message: err.message || "Bulk permanent delete failed." });
+  }
+});
+
+router.delete("/trash/empty", async (req, res) => {
+  try {
+    const files = await File.find({ userId: req.user.id, isTrash: true });
+    let count = 0;
+    for (const file of files) {
+      if (await deleteFilePermanently(file._id, req.user.id)) {
+        count++;
+      }
+    }
+    res.json({ message: "Trash emptied.", count });
+  } catch (err) {
+    res.status(500).json({ message: err.message || "Empty trash failed." });
   }
 });
 
@@ -529,6 +720,7 @@ router.get("/folders", async (req, res) => {
     const folders = await File.find({
       userId: req.user.id,
       type: "folder",
+      isTrash: false,
     })
       .sort({ s3Key: 1 })
       .select("_id name parentId s3Key")

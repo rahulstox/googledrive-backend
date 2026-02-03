@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-const s3Client = new S3Client({
+export const s3Client = new S3Client({
   region: process.env.AWS_REGION || "us-east-1",
   credentials: {
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -40,14 +40,18 @@ export async function getPresignedDownloadUrl(key) {
   return getSignedUrl(s3Client, command, { expiresIn: PRESIGN_EXPIRY });
 }
 
-export async function getObjectStream(key) {
-  const response = await s3Client.send(
-    new GetObjectCommand({ Bucket: BUCKET, Key: key })
-  );
+export async function getObjectStream(key, range = null) {
+  const params = { Bucket: BUCKET, Key: key };
+  if (range) {
+    params.Range = range;
+  }
+  const response = await s3Client.send(new GetObjectCommand(params));
   return {
     body: response.Body,
     contentType: response.ContentType || "application/octet-stream",
     contentLength: response.ContentLength,
+    contentRange: response.ContentRange,
+    acceptRanges: response.AcceptRanges,
   };
 }
 
