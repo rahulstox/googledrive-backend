@@ -252,6 +252,7 @@ router.post(
 
       // Always return 204 to prevent user enumeration
       if (!user) {
+        console.log(`[Forgot Password] User not found for email: ${email}`);
         return res.status(204).send();
       }
 
@@ -270,10 +271,19 @@ router.post(
         expiresAt,
       });
 
-      const baseUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+      // Use FRONTEND_URL env var, or fallback to request origin (for deployment), or localhost
+      const baseUrl =
+        process.env.FRONTEND_URL ||
+        req.get("origin") ||
+        "http://localhost:5173";
+
       // Encode email to base64url for URL safety
       const emailEncoded = Buffer.from(email).toString("base64url");
       const resetLink = `${baseUrl}/auth/reset-password?token=${resetToken}&email=${emailEncoded}`;
+
+      console.log(
+        `[Forgot Password] Sending email to ${email} with link: ${resetLink}`,
+      );
 
       // Send email (async, don't await to block response, but catch errors)
       sendPasswordResetEmail(user.email, user.firstName, resetLink).catch(

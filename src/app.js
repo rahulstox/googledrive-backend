@@ -15,6 +15,7 @@ app.set("trust proxy", 1);
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 const allowedOrigins = [
   process.env.FRONTEND_URL,
+  "https://googledrive-frontend-seven.vercel.app", // Explicitly allow deployed frontend
   "http://localhost:5173",
   "http://localhost:5174",
   "http://localhost:3000",
@@ -26,7 +27,7 @@ app.use(
       return cb(new Error("Not allowed by CORS"));
     },
     credentials: true,
-  })
+  }),
 );
 app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser());
