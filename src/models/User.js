@@ -68,9 +68,13 @@ const userSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// Composite indexes for performance
+userSchema.index({ email: 1, isActive: 1 });
+userSchema.index({ activationToken: 1 });
+
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password") || !this.password) return next();
-  const salt = await bcrypt.genSalt(12);
+  const salt = await bcrypt.genSalt(10); // Reduced from 12 for performance (still secure)
   this.password = await bcrypt.hash(this.password, salt);
   next();
 });

@@ -3,14 +3,17 @@ import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
+import passport from "passport";
 import authRoutes from "./routes/authRoutes.js";
 import fileRoutes from "./routes/fileRoutes.js";
 import { checkS3Connection } from "./services/s3Service.js";
 import mongoose from "mongoose";
+import setupPassport from "./config/passport.js";
 
 const app = express();
 
 app.set("trust proxy", 1);
+setupPassport(); // Initialize Passport strategies
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 const allowedOrigins = [
@@ -31,6 +34,7 @@ app.use(
 );
 app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser());
+app.use(passport.initialize());
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,

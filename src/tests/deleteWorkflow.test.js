@@ -20,6 +20,10 @@ vi.mock("../middleware/auth.js", () => ({
     req.user = { id: "user_id" };
     next();
   },
+  authenticate: (req, res, next) => {
+    req.user = { id: "user_id" };
+    next();
+  },
 }));
 
 vi.mock("../services/s3Service.js", () => ({
