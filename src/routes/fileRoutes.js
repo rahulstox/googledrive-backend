@@ -704,7 +704,7 @@ router.post("/bulk-star", async (req, res) => {
 
     await File.updateMany(
       { _id: { $in: ids }, userId: req.user.id },
-      { $set: { isStarred: newStatus } }
+      { $set: { isStarred: newStatus } },
     );
 
     res.json({
@@ -766,6 +766,50 @@ router.delete("/trash/empty", async (req, res) => {
     res.json({ message: "Trash emptied.", count });
   } catch (err) {
     res.status(500).json({ message: err.message || "Empty trash failed." });
+  }
+});
+
+router.get("/folder/:folderId", async (req, res) => {
+  try {
+    const { folderId } = req.params;
+
+    // 1. Get the folder itself to verify existence and get details
+    const currentFolder = await File.findOne({
+      _id: folderId,
+      userId: req.user.id,
+      type: "folder",
+      isTrash: false,
+    });
+
+    if (!currentFolder) {
+      return res.status(404).json({ message: "Folder not found." });
+    }
+
+    // 2. Get items in this folder
+    const items = await File.find({
+      userId: req.user.id,
+      parentId: folderId,
+      isTrash: false,
+    })
+      .sort({ type: 1, name: 1 })
+      .lean();
+
+    // 3. Generate breadcrumbs
+    const breadcrumbs = [];
+    let curr = currentFolder;
+    while (curr) {
+      breadcrumbs.unshift({ id: curr._id, name: curr.name });
+      if (!curr.parentId) break;
+      curr = await File.findOne({
+        _id: curr.parentId,
+        userId: req.user.id,
+      }).select("_id name parentId");
+    }
+
+    res.json({ items, breadcrumbs });
+  } catch (err) {
+    console.error("Folder load error:", err);
+    res.status(500).json({ message: "Failed to load folder contents." });
   }
 });
 
