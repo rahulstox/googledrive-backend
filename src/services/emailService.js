@@ -30,6 +30,11 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const EMAIL_FROM = process.env.EMAIL_FROM_ADDR || SMTP_USER;
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Krypton Drive";
 
+// Log Config on Startup (Masking Password)
+console.log(
+  `[EmailService] Config: Host=${SMTP_HOST}, Port=${SMTP_PORT}, User=${SMTP_USER ? "Set" : "Missing"}, Secure=${SMTP_PORT === 465}`,
+);
+
 // --- Redis Setup (Safe Mode) ---
 let redis = null;
 if (process.env.REDIS_URL) {
@@ -46,19 +51,25 @@ if (process.env.REDIS_URL) {
   );
 }
 
-// --- Transporter ---
+// --- Transporter (Updated with IPv4 and Debugging) ---
 const transporter = nodemailer.createTransport({
   pool: true,
   host: SMTP_HOST,
   port: SMTP_PORT,
   secure: SMTP_PORT === 465, // true for 465, false for other ports
   auth: { user: SMTP_USER, pass: SMTP_PASS },
-  tls: { rejectUnauthorized: false }, // Helps with some Render/SSL handshake issues
+  tls: { rejectUnauthorized: false }, // Helps with SSL handshake issues
+
+  // 🔥 FIXES: Force IPv4 and Enable Logs
+  family: 4, // Force IPv4 (Fixes Render timeouts)
+  logger: true, // Logs SMTP transaction details to console
+  debug: true, // Include debug info in logs
+  connectionTimeout: 10000, // 10s timeout
 });
 
 // --- Helper Functions ---
 async function checkRateLimit() {
-  if (!redis) return true; // Bypass if no Redis
+  if (!redis) return true;
   try {
     const key = `email:rate-limit:${new Date().getMinutes()}`;
     const count = await redis.incr(key);
@@ -101,11 +112,12 @@ async function sendEmail({
   if (!(await checkRateLimit())) throw new Error("Rate limit exceeded");
 
   let attempt = 0;
-  const MAX_RETRIES = 2; // Reduced retries for faster feedback
+  const MAX_RETRIES = 2;
 
   while (attempt <= MAX_RETRIES) {
     attempt++;
     try {
+      console.log(`[Email] Attempt ${attempt} sending to ${to}...`);
       const info = await transporter.sendMail({
         from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
         to,
@@ -117,10 +129,17 @@ async function sendEmail({
 
       emailSendTotal.inc();
       await markProcessed(jobId);
-      console.log(`[Email] Sent to ${to}`);
+      console.log(
+        `[Email] Sent successfully to ${to}. MessageID: ${info.messageId}`,
+      );
       return info;
     } catch (err) {
       console.error(`[Email] Attempt ${attempt} failed: ${err.message}`);
+
+      // Log explicit SMTP error details if available
+      if (err.command) console.error(`[Email] SMTP Command: ${err.command}`);
+      if (err.response) console.error(`[Email] SMTP Response: ${err.response}`);
+
       if (attempt > MAX_RETRIES) {
         emailFailTotal.inc();
         throw err;
@@ -135,8 +154,14 @@ async function sendActivationEmail(to, name, link) {
   return sendEmail({
     to,
     subject: "Activate your Krypton Drive account",
-    html: `<h2>Welcome ${name}!</h2><p>Click <a href="${link}">here</a> to activate your account.</p>`,
-    text: `Welcome ${name}! Link: ${link}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; padding: 20px;">
+        <h2>Welcome to Krypton Drive, ${name}!</h2>
+        <p>Click the button below to activate your account:</p>
+        <a href="${link}" style="display: inline-block; padding: 10px 20px; background-color: #4F46E5; color: white; text-decoration: none; border-radius: 5px;">Activate Account</a>
+        <p>Or paste this link: ${link}</p>
+      </div>`,
+    text: `Welcome ${name}! Activate here: ${link}`,
   });
 }
 
@@ -149,7 +174,7 @@ async function sendAccountDeletionEmail(to, name) {
   });
 }
 
-// Stubs for other emails
+// Stubs
 async function sendPasswordResetEmail(to, name, link) {
   return sendEmail({
     to,

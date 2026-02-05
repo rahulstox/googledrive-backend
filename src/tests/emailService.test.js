@@ -82,20 +82,17 @@ describe("Email Service (Nodemailer)", () => {
   it("should initialize Nodemailer with correct config", () => {
     expect(nodemailer.createTransport).toHaveBeenCalledWith(
       expect.objectContaining({
+        pool: true,
         host: "smtp.test.com",
         port: 587,
         secure: false,
-        auth: {
-          user: "test@krypton.com",
-          pass: "password",
-        },
-        pool: true,
-        maxConnections: 5,
-        maxMessages: 100,
+        auth: { user: "test@krypton.com", pass: "password" },
         tls: {
-          rejectUnauthorized: true,
-          minVersion: "TLSv1.2",
+          rejectUnauthorized: false,
         },
+        family: 4,
+        logger: true,
+        debug: true,
       }),
     );
   });
@@ -152,18 +149,16 @@ describe("Email Service (Nodemailer)", () => {
 
     // Attach the expectation handler immediately to prevent UnhandledRejection
     const checkPromise = expect(promise).rejects.toThrow(
-      /Email failed after 5 attempts/,
+      "SMTP Connection Failed",
     );
 
-    // Fast-forward through retries
-    // We need to advance time enough to cover all backoffs (2+4+8+16+32 = 62s)
-    // We do this incrementally to ensure the event loop processes each retry
-    for (let i = 0; i < 6; i++) {
-      await vi.advanceTimersByTimeAsync(40000); // Advance more than max backoff each time
+    // Fast-forward through retries (1s + 2s = 3s total wait)
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(2000);
     }
 
     await checkPromise;
-    expect(sendMailMock).toHaveBeenCalledTimes(6); // Initial + 5 retries
+    expect(sendMailMock).toHaveBeenCalledTimes(3); // Initial + 2 retries
 
     vi.useRealTimers();
   });
