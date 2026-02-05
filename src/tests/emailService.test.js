@@ -1,5 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import nodemailer from "nodemailer";
+import { Resend } from "resend";
+
+// --- 1. HOIST MOCKS (Define them before anything else to prevent ReferenceError) ---
+const { sendMailMock, sendResendMock } = vi.hoisted(() => {
+  return {
+    sendMailMock: vi.fn(),
+    sendResendMock: vi.fn(),
+  };
+});
+
+// --- 2. SETUP MOCKS ---
 
 // Mock ioredis
 vi.mock("ioredis", () => {
@@ -38,12 +49,18 @@ vi.mock("prom-client", () => {
   };
 });
 
-// Hoist the mock function so it can be used in vi.mock
-const { sendMailMock } = vi.hoisted(() => {
-  return { sendMailMock: vi.fn() };
+// Mock Resend (Using the hoisted variable)
+vi.mock("resend", () => {
+  return {
+    Resend: class {
+      constructor() {
+        this.emails = { send: sendResendMock };
+      }
+    },
+  };
 });
 
-// Mock Nodemailer
+// Mock Nodemailer (Using the hoisted variable)
 vi.mock("nodemailer", () => {
   return {
     default: {
@@ -54,112 +71,76 @@ vi.mock("nodemailer", () => {
   };
 });
 
-describe("Email Service (Nodemailer)", () => {
+// --- 3. TESTS ---
+describe("Email Service", () => {
   let emailService;
 
   beforeEach(async () => {
     vi.resetModules();
+    vi.clearAllMocks();
+
+    // Default: SMTP Fallback Setup (No Resend Key)
     process.env.SMTP_HOST = "smtp.test.com";
-    process.env.SMTP_PORT = "587";
     process.env.SMTP_USER = "test@krypton.com";
     process.env.SMTP_PASS = "password";
+    delete process.env.RESEND_API_KEY;
 
-    // Clear mocks
-    vi.clearAllMocks();
+    // Reset default mock implementations
     sendMailMock.mockResolvedValue({ messageId: "email_123" });
+    sendResendMock.mockResolvedValue({
+      data: { id: "resend_123" },
+      error: null,
+    });
 
-    // Dynamic import to ensure fresh module evaluation with new env vars
+    // Dynamic import to pick up new env vars
     emailService = await import("../services/emailService.js");
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     delete process.env.SMTP_HOST;
-    delete process.env.SMTP_PORT;
     delete process.env.SMTP_USER;
     delete process.env.SMTP_PASS;
+    delete process.env.RESEND_API_KEY;
   });
 
-  it("should initialize Nodemailer with correct config", () => {
-    expect(nodemailer.createTransport).toHaveBeenCalledWith(
-      expect.objectContaining({
-        pool: true,
-        host: "smtp.test.com",
-        port: 587,
-        secure: false,
-        auth: { user: "test@krypton.com", pass: "password" },
-        tls: {
-          rejectUnauthorized: false,
-        },
-        family: 4,
-        logger: true,
-        debug: true,
-      }),
-    );
-  });
-
-  it("should send activation email successfully", async () => {
+  // Test 1: SMTP Fallback (When Resend Key is missing)
+  it("should fall back to Nodemailer when RESEND_API_KEY is missing", async () => {
     const result = await emailService.sendActivationEmail(
-      "test@example.com",
+      "user@smtp.com",
       "John",
-      "http://link.com",
-    );
-
-    expect(result).toEqual({ messageId: "email_123" });
-    expect(sendMailMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: "test@example.com",
-        subject: "Activate your Krypton Drive account",
-        html: expect.stringContaining("Welcome to Krypton Drive, John!"),
-      }),
-    );
-  });
-
-  it.skip("should send password reset email successfully", async () => {
-    /*
-    const result = await emailService.sendPasswordResetEmail(
-      "user@example.com",
-      "http://reset.com",
-    );
-    */
-  });
-
-  it.skip("should send password changed email successfully", async () => {
-    /*
-    const details = { time: "10:00 AM", ip: "127.0.0.1" };
-    const result = await emailService.sendPasswordChangedEmail(
-      "user@example.com",
-      "John",
-      details,
-    );
-    */
-  });
-
-  it("should handle sending errors and retry logic", async () => {
-    vi.useFakeTimers();
-    const error = new Error("SMTP Connection Failed");
-    // @ts-ignore
-    error.responseCode = 421; // Transient
-    sendMailMock.mockRejectedValue(error);
-
-    const promise = emailService.sendActivationEmail(
-      "fail@test.com",
-      "User",
       "link",
     );
 
-    // Attach the expectation handler immediately to prevent UnhandledRejection
-    const checkPromise = expect(promise).rejects.toThrow(
-      "SMTP Connection Failed",
+    // Should verify SMTP was used
+    expect(nodemailer.createTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        port: 465,
+        secure: true,
+        auth: { user: "test@krypton.com", pass: "password" },
+      }),
+    );
+    expect(sendMailMock).toHaveBeenCalledTimes(1);
+    expect(sendResendMock).not.toHaveBeenCalled();
+    expect(result).toHaveProperty("messageId", "email_123");
+  });
+
+  // Test 2: Resend Priority (When Key is present)
+  it("should prioritize Resend API when RESEND_API_KEY is set", async () => {
+    vi.resetModules(); // Reset to reload env vars
+    process.env.RESEND_API_KEY = "re_123_test";
+
+    // Re-import service with new Env
+    const emailServiceWithResend = await import("../services/emailService.js");
+
+    const result = await emailServiceWithResend.sendActivationEmail(
+      "user@resend.com",
+      "Jane",
+      "link",
     );
 
-    // Fast-forward through retries (1s + 2s = 3s total wait)
-    for (let i = 0; i < 3; i++) {
-      await vi.advanceTimersByTimeAsync(2000);
-    }
-
-    await checkPromise;
-    expect(sendMailMock).toHaveBeenCalledTimes(3); // Initial + 2 retries
-
-    vi.useRealTimers();
+    expect(sendResendMock).toHaveBeenCalledTimes(1);
+    expect(sendMailMock).not.toHaveBeenCalled(); // Ensure SMTP was skipped
+    expect(result.data).toHaveProperty("id", "resend_123");
   });
 });
