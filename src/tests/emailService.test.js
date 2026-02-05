@@ -1,16 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import nodemailer from "nodemailer";
-import { Resend } from "resend";
 
-// --- 1. HOIST MOCKS (Define them before anything else to prevent ReferenceError) ---
-const { sendMailMock, sendResendMock } = vi.hoisted(() => {
-  return {
-    sendMailMock: vi.fn(),
-    sendResendMock: vi.fn(),
-  };
-});
-
-// --- 2. SETUP MOCKS ---
+// --- MOCKS ---
 
 // Mock ioredis
 vi.mock("ioredis", () => {
@@ -49,98 +39,105 @@ vi.mock("prom-client", () => {
   };
 });
 
-// Mock Resend (Using the hoisted variable)
-vi.mock("resend", () => {
-  return {
-    Resend: class {
-      constructor() {
-        this.emails = { send: sendResendMock };
-      }
-    },
-  };
-});
+// Mock global fetch
+const fetchMock = vi.fn();
+vi.stubGlobal("fetch", fetchMock);
 
-// Mock Nodemailer (Using the hoisted variable)
-vi.mock("nodemailer", () => {
-  return {
-    default: {
-      createTransport: vi.fn(() => ({
-        sendMail: sendMailMock,
-      })),
-    },
-  };
-});
-
-// --- 3. TESTS ---
-describe("Email Service", () => {
+// --- TESTS ---
+describe("Email Service (Brevo API)", () => {
   let emailService;
 
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
 
-    // Default: SMTP Fallback Setup (No Resend Key)
-    process.env.SMTP_HOST = "smtp.test.com";
-    process.env.SMTP_USER = "test@krypton.com";
-    process.env.SMTP_PASS = "password";
-    delete process.env.RESEND_API_KEY;
+    // Set Env Vars
+    process.env.BREVO_API_KEY = "xkeysib-test-key";
+    process.env.EMAIL_FROM_NAME = "Krypton Test";
 
-    // Reset default mock implementations
-    sendMailMock.mockResolvedValue({ messageId: "email_123" });
-    sendResendMock.mockResolvedValue({
-      data: { id: "resend_123" },
-      error: null,
-    });
-
-    // Dynamic import to pick up new env vars
+    // Dynamic import to pick up new env vars and mock state
     emailService = await import("../services/emailService.js");
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
-    delete process.env.SMTP_HOST;
-    delete process.env.SMTP_USER;
-    delete process.env.SMTP_PASS;
-    delete process.env.RESEND_API_KEY;
+    delete process.env.BREVO_API_KEY;
+    delete process.env.EMAIL_FROM_NAME;
   });
 
-  // Test 1: SMTP Fallback (When Resend Key is missing)
-  it("should fall back to Nodemailer when RESEND_API_KEY is missing", async () => {
+  it("should send activation email successfully via Brevo", async () => {
+    // Mock successful fetch response
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ messageId: "<test-msg-id@brevo>" }),
+    });
+
     const result = await emailService.sendActivationEmail(
-      "user@smtp.com",
+      "user@test.com",
       "John",
-      "link",
+      "http://activate.link",
     );
 
-    // Should verify SMTP was used
-    expect(nodemailer.createTransport).toHaveBeenCalledWith(
+    // Verify fetch call
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.brevo.com/v3/smtp/email",
       expect.objectContaining({
-        port: 465,
-        secure: true,
-        auth: { user: "test@krypton.com", pass: "password" },
+        method: "POST",
+        headers: expect.objectContaining({
+          "api-key": "xkeysib-test-key",
+          "content-type": "application/json",
+        }),
+        body: expect.stringContaining("user@test.com"),
       }),
     );
-    expect(sendMailMock).toHaveBeenCalledTimes(1);
-    expect(sendResendMock).not.toHaveBeenCalled();
-    expect(result).toHaveProperty("messageId", "email_123");
+
+    // Verify body content
+    const callArgs = fetchMock.mock.calls[0];
+    const body = JSON.parse(callArgs[1].body);
+    expect(body.sender.name).toBe("Krypton Test");
+    expect(body.to[0].email).toBe("user@test.com");
+    expect(body.htmlContent).toContain("http://activate.link");
+
+    // Verify result
+    expect(result).toEqual({ messageId: "<test-msg-id@brevo>" });
   });
 
-  // Test 2: Resend Priority (When Key is present)
-  it("should prioritize Resend API when RESEND_API_KEY is set", async () => {
-    vi.resetModules(); // Reset to reload env vars
-    process.env.RESEND_API_KEY = "re_123_test";
+  it("should throw error when Brevo API fails", async () => {
+    // Mock failed fetch response
+    fetchMock.mockResolvedValue({
+      ok: false,
+      statusText: "Unauthorized",
+      json: async () => ({ message: "Invalid API Key" }),
+    });
 
-    // Re-import service with new Env
-    const emailServiceWithResend = await import("../services/emailService.js");
+    await expect(
+      emailService.sendActivationEmail("user@test.com", "John", "http://link"),
+    ).rejects.toThrow("Invalid API Key");
 
-    const result = await emailServiceWithResend.sendActivationEmail(
-      "user@resend.com",
-      "Jane",
-      "link",
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("should log manual fallback link on failure", async () => {
+    // Mock network error
+    fetchMock.mockRejectedValue(new Error("Network Error"));
+
+    const consoleSpy = vi.spyOn(console, "log");
+    const consoleErrorSpy = vi.spyOn(console, "error");
+
+    await expect(
+      emailService.sendActivationEmail(
+        "user@test.com",
+        "John",
+        "http://manual.link",
+      ),
+    ).rejects.toThrow("Network Error");
+
+    // Check if fallback link was logged
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "MANUAL FALLBACK LINK: Welcome John! Link: http://manual.link",
+      ),
     );
-
-    expect(sendResendMock).toHaveBeenCalledTimes(1);
-    expect(sendMailMock).not.toHaveBeenCalled(); // Ensure SMTP was skipped
-    expect(result.data).toHaveProperty("id", "resend_123");
   });
 });
