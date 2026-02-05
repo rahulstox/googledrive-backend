@@ -41,17 +41,42 @@ Optional with defaults: `PORT`, `NODE_ENV`, `JWT_EXPIRES_IN`, `FRONTEND_URL`, `R
    - `FRONTEND_URL` for CORS and email links
    - `REDIS_URL` (optional): Connection string for Redis caching (e.g., `redis://localhost:6379`).
 2. `npm install`
-3.4. `npm run dev` (or `npm start`)
+   3.4. `npm run dev` (or `npm start`)
 
 ## Performance & Testing
 
 ### Load Testing
+
 Run the K6 load test script to verify performance SLOs:
+
 ```bash
+# Auth Load Test
 k6 run tests/k6/auth_load_test.js
+
+# Full Benchmark (1000 Users)
+k6 run tests/k6/benchmark.js
+```
+
+### Pre-Production Verification
+
+Before deploying, run the verification suite to ensure environment integrity and security:
+
+```bash
+# 1. Audit Environment Variables
+node scripts/verify-env.cjs
+
+# 2. Check for Forbidden Artifacts (.env, etc)
+node scripts/check-artifacts.cjs
+
+# 3. Security Audit
+npm audit
+
+# 4. Verify Endpoints (requires running server)
+node scripts/verify-endpoints.cjs
 ```
 
 ### Unit Tests
+
 Run the comprehensive test suite (including registration workflow, timeouts, and rate limits):
 
 ```bash

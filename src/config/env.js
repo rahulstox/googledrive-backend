@@ -12,7 +12,6 @@ const optionalWithDefaults = {
   NODE_ENV: "development",
   JWT_EXPIRES_IN: "7d",
   FRONTEND_URL: "http://localhost:5173",
-  RESEND_FROM_EMAIL: "onboarding@resend.dev",
 };
 
 function validateEnv() {

@@ -1,0 +1,27 @@
+# Dependency Directories
+node_modules
+npm-debug.log
+
+# Environment Variables & Secrets (CRITICAL)
+.env
+.env.local
+.env.*
+
+# Testing & Verification Artifacts
+tests/
+coverage/
+scripts/verify-*.cjs
+scripts/check-*.cjs
+security-audit.json
+
+# IDE Configuration
+.vscode/
+.idea/
+.cursor/
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md

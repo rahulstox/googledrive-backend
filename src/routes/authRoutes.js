@@ -62,9 +62,11 @@ router.post(
   "/register",
   [
     body("email")
-      .isEmail()
-      .normalizeEmail()
-      .withMessage("Valid email is required"),
+      .matches(
+        /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}))$/,
+      )
+      .withMessage("Please provide a valid email address")
+      .normalizeEmail(),
     body("password")
       .isLength({ min: 8 })
       .withMessage("Password must be at least 8 characters")
@@ -138,14 +140,14 @@ router.post(
       console.log(`[Register][${requestId}] Sending activation email...`);
       console.time(`[Register][${requestId}] Email Send`);
 
-      // Add timeout race for email sending (increased to 15s)
+      // Add timeout race for email sending (increased to 60s)
       const emailPromise = sendActivationEmail(
         email,
         firstName,
         activationLink,
       );
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Email sending timed out")), 15000),
+        setTimeout(() => reject(new Error("Email sending timed out")), 60000),
       );
 
       try {

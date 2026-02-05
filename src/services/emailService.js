@@ -1,30 +1,82 @@
 import nodemailer from "nodemailer";
-import { Resend } from "resend";
+import Redis from "ioredis";
+import client from "prom-client";
+import { randomUUID } from "crypto";
 
-// Validate essential configuration
+// --- Observability: Prometheus Metrics ---
+const register = client.register;
+
+// Check if metrics already exist to prevent re-registration errors during hot reload/tests
+const getMetric = (name, type, help) => {
+  const existing = register.getSingleMetric(name);
+  if (existing) return existing;
+  const metric = new type({ name, help, registers: [register] });
+  return metric;
+};
+
+const emailSendTotal = getMetric(
+  "email_send_total",
+  client.Counter,
+  "Total number of email send attempts",
+);
+const emailRetryTotal = getMetric(
+  "email_retry_total",
+  client.Counter,
+  "Total number of email retries",
+);
+const emailFailTotal = getMetric(
+  "email_fail_total",
+  client.Counter,
+  "Total number of failed email sends",
+);
+const emailDuration = getMetric(
+  "email_duration_seconds",
+  client.Histogram,
+  "Duration of email sending in seconds",
+);
+
+// --- Configuration ---
 const SMTP_HOST = process.env.SMTP_HOST || "smtp.gmail.com";
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || "587", 10);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_POOL_MAX_CONNECTIONS = parseInt(
+  process.env.SMTP_POOL_MAX_CONNECTIONS || "5",
+  10,
+);
+const SMTP_POOL_MAX_MESSAGES = parseInt(
+  process.env.SMTP_POOL_MAX_MESSAGES || "100",
+  10,
+);
+const SMTP_RATE_LIMIT_PER_MIN = parseInt(
+  process.env.SMTP_RATE_LIMIT_PER_MIN || "100",
+  10,
+);
+const EMAIL_FROM =
+  process.env.EMAIL_FROM_ADDR || SMTP_USER || "noreply@kryptondrive.com";
+const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Krypton Drive";
+const DOMAIN_URL = process.env.DOMAIN_URL || "http://localhost:5173";
 
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const RESEND_FROM = process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev";
+// --- Redis Client (for Idempotency & Rate Limiting) ---
+const redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379", {
+  lazyConnect: true,
+  retryStrategy: (times) => Math.min(times * 50, 2000),
+});
 
-if (!RESEND_API_KEY && (!SMTP_USER || !SMTP_PASS)) {
+redis.on("error", (err) => {
+  console.warn("[EmailService] Redis connection error:", err.message);
+  // We continue; logic should degrade gracefully if Redis is down
+});
+
+// --- Nodemailer Transporter (Pooled) ---
+if (!SMTP_USER || !SMTP_PASS) {
   console.error(
-    "[EmailService] CRITICAL: Missing email credentials (SMTP or Resend). Emails will not send.",
+    "[EmailService] CRITICAL: Missing SMTP_USER or SMTP_PASS. Emails will not send.",
   );
 }
 
-// Resend Client
-let resendClient = null;
-if (RESEND_API_KEY) {
-  resendClient = new Resend(RESEND_API_KEY);
-  console.log("[EmailService] Using Resend API for email delivery.");
-}
-
-// Nodemailer Transporter (Fallback or Primary if Resend missing)
 const transporter = nodemailer.createTransport({
+  pool: true,
   host: SMTP_HOST,
   port: SMTP_PORT,
   secure: SMTP_PORT === 465, // true for 465, false for other ports
@@ -32,335 +84,280 @@ const transporter = nodemailer.createTransport({
     user: SMTP_USER,
     pass: SMTP_PASS,
   },
-  // Optimization for Gmail/Render: Force IPv4 and relax TLS if needed
-  family: 4,
+  maxConnections: SMTP_POOL_MAX_CONNECTIONS,
+  maxMessages: SMTP_POOL_MAX_MESSAGES,
   tls: {
-    rejectUnauthorized: false,
+    rejectUnauthorized: true, // Enforce valid certs (Production Grade)
+    minVersion: "TLSv1.2", // Enforce strong TLS
   },
-  // Connection timeout settings
-  connectionTimeout: 10000, // 10 seconds
-  greetingTimeout: 5000, // 5 seconds
-  socketTimeout: 10000, // 10 seconds
+  // Default connection timeout
+  connectionTimeout: 10000,
+  greetingTimeout: 5000,
+  socketTimeout: 10000,
 });
 
-const EMAIL_FROM = process.env.SMTP_FROM || SMTP_USER;
-const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@kryptondrive.com";
+/**
+ * Structured Log Helper
+ */
+function logEvent(event, data) {
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      service: "email-service",
+      event,
+      ...data,
+    }),
+  );
+}
 
 /**
- * Send an email using Resend or Nodemailer
- * @param {string} to - Recipient email
- * @param {string} subject - Email subject
- * @param {string} html - HTML content
- * @param {string} text - Plain text content (optional)
- * @returns {Promise<object>} - Response
+ * Rate Limiter (Token Bucket approx using Redis)
+ * @returns {Promise<boolean>} true if allowed, false if limited
  */
-async function sendEmail({ to, subject, html, text }) {
+async function checkRateLimit() {
+  try {
+    const key = `email:rate-limit:${new Date().getMinutes()}`;
+    const count = await redis.incr(key);
+    if (count === 1) {
+      await redis.expire(key, 60); // Expire after 1 minute
+    }
+    return count <= SMTP_RATE_LIMIT_PER_MIN;
+  } catch (err) {
+    // If Redis fails, allow traffic to avoid blocking critical emails
+    console.warn(
+      "[EmailService] Rate limit check failed (Redis down), allowing.",
+      err.message,
+    );
+    return true;
+  }
+}
+
+/**
+ * Idempotency Check
+ * @param {string} id - Unique Job ID
+ * @returns {Promise<boolean>} true if already processed
+ */
+async function checkIdempotency(id) {
+  if (!id) return false;
+  try {
+    const key = `email:idempotency:${id}`;
+    const exists = await redis.get(key);
+    return !!exists;
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * Mark Job as Processed
+ * @param {string} id
+ */
+async function markProcessed(id) {
+  if (!id) return;
+  try {
+    const key = `email:idempotency:${id}`;
+    await redis.set(key, "1", "EX", 86400); // 24 hours retention
+  } catch (err) {
+    console.warn("[EmailService] Failed to set idempotency key:", err.message);
+  }
+}
+
+/**
+ * Send Email with Retry, Idempotency, and Monitoring
+ * @param {object} options - { to, subject, html, text, userId, registrationId }
+ */
+async function sendEmail({
+  to,
+  subject,
+  html,
+  text,
+  userId = "unknown",
+  registrationId = "unknown",
+}) {
+  const jobId = registrationId !== "unknown" ? registrationId : randomUUID();
   const plainText = text || html.replace(/<[^>]*>?/gm, "");
 
-  // Priority 1: Resend API (if configured)
-  if (resendClient) {
-    try {
-      const data = await resendClient.emails.send({
-        from: RESEND_FROM,
-        to,
-        subject,
-        html,
-        text: plainText,
-      });
-      console.log(
-        `[EmailService] (Resend) Email sent to ${to}. ID: ${data.id}`,
-      );
-      return data;
-    } catch (err) {
-      console.error(
-        `[EmailService] (Resend) Failed: ${err.message}. Falling back to SMTP...`,
-      );
-      // Proceed to SMTP fallback
-    }
+  // 1. Idempotency Check
+  if (await checkIdempotency(jobId)) {
+    logEvent("email_skipped_idempotent", { jobId, userId, to });
+    return { skipped: true, message: "Already processed" };
   }
 
-  // Priority 2: Nodemailer (SMTP)
-  const MAX_RETRIES = 3;
-  let attempt = 0;
+  // 2. Rate Limiting
+  if (!(await checkRateLimit())) {
+    logEvent("email_rate_limited", { jobId, userId, to });
+    emailFailTotal.inc();
+    throw new Error("Email rate limit exceeded. Please try again later.");
+  }
 
-  while (attempt < MAX_RETRIES) {
+  const endTimer = emailDuration.startTimer();
+  let attempt = 0;
+  const MAX_RETRIES = 5;
+
+  // 3. Retry Loop
+  while (attempt <= MAX_RETRIES) {
+    attempt++;
+    emailSendTotal.inc();
+
     try {
       const info = await transporter.sendMail({
-        from: EMAIL_FROM,
+        from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
         to,
         subject,
         html,
         text: plainText,
+        headers: {
+          "X-Entity-Ref-ID": userId,
+          "X-Job-ID": jobId,
+          "List-Unsubscribe": `<${DOMAIN_URL}/unsubscribe?email=${to}>`,
+          Precedence: "bulk",
+        },
       });
 
-      console.log(
-        `[EmailService] (SMTP) Email sent to ${to}. MessageId: ${info.messageId} (Attempt ${attempt + 1})`,
-      );
+      logEvent("email_sent_success", {
+        jobId,
+        userId,
+        to,
+        messageId: info.messageId,
+        attempt,
+      });
+
+      await markProcessed(jobId);
+      endTimer();
       return info;
     } catch (err) {
-      attempt++;
-      console.error(
-        `[EmailService] (SMTP) Attempt ${attempt} failed sending to ${to}: ${err.message}`,
-      );
+      const isTransient =
+        err.responseCode &&
+        err.responseCode >= 400 &&
+        err.responseCode < 500 &&
+        err.responseCode !== 403; // 4xx are usually transient, except 403 (Auth)
 
-      if (attempt >= MAX_RETRIES) {
+      // Treat some 5xx as permanent (e.g., 550 User not found), but for now we focus on connection issues
+      // Hard failure if auth fails (535) or strictly fatal
+      if (err.responseCode === 535) {
+        logEvent("email_auth_failed", { jobId, userId, error: err.message });
+        emailFailTotal.inc();
+        endTimer();
+        throw err; // Don't retry auth failures
+      }
+
+      logEvent("email_send_failed", {
+        jobId,
+        userId,
+        attempt,
+        error: err.message,
+        responseCode: err.responseCode,
+      });
+
+      if (attempt > MAX_RETRIES) {
+        emailFailTotal.inc();
+        endTimer();
         throw new Error(
-          `Email Send Failed after ${MAX_RETRIES} attempts: ${err.message}`,
+          `Email failed after ${MAX_RETRIES} attempts: ${err.message}`,
         );
       }
 
-      // Exponential backoff: 1s, 2s, 4s...
-      const delay = Math.pow(2, attempt - 1) * 1000;
+      // Exponential Backoff: 2s, 4s, 8s, 16s, 32s
+      const delay = Math.pow(2, attempt) * 1000;
+      emailRetryTotal.inc();
+
+      logEvent("email_retry_scheduled", {
+        jobId,
+        userId,
+        delayMs: delay,
+        nextAttempt: attempt + 1,
+      });
+
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 }
 
-export async function sendActivationEmail(email, firstName, activationLink) {
-  console.log(`[EmailService] Preparing to send activation email to: ${email}`);
-  const start = Date.now();
-  try {
-    const html = `
-        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9fafb; padding: 40px; border-radius: 12px;">
-          <div style="text-align: center; margin-bottom: 32px;">
-            <h1 style="color: #111827; margin: 0; font-size: 24px; font-weight: 700;">Krypton Drive</h1>
-          </div>
-          <div style="background-color: white; padding: 32px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-            <h2 style="color: #1f2937; margin-top: 0; font-size: 20px;">Welcome, ${firstName}!</h2>
-            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
-              Thanks for signing up for Krypton Drive. Please confirm your email address to activate your account and start securing your files.
-            </p>
-            <div style="text-align: center; margin: 32px 0;">
-              <a href="${activationLink}" style="background-color: #2563eb; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);">Activate Account</a>
-            </div>
-            <p style="color: #6b7280; font-size: 14px; line-height: 1.5; margin-bottom: 0;">
-              Or copy and paste this link into your browser:<br>
-              <a href="${activationLink}" style="color: #2563eb; word-break: break-all;">${activationLink}</a>
-            </p>
-            <p style="color: #9ca3af; font-size: 12px; margin-top: 24px;">
-              This link will expire in 24 hours. If you didn't create an account, you can safely ignore this email.
-            </p>
-          </div>
-          <div style="text-align: center; margin-top: 24px;">
-            <p style="color: #9ca3af; font-size: 12px;">
-              &copy; ${new Date().getFullYear()} Krypton Drive. All rights reserved.
-            </p>
-          </div>
-        </div>
-      `;
+/**
+ * Convenience method for activation emails
+ */
+async function sendActivationEmail(to, name, link) {
+  const subject = "Activate your Krypton Drive account";
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2>Welcome to Krypton Drive, ${name}!</h2>
+      <p>Please click the button below to verify your email address and activate your account.</p>
+      <div style="text-align: center; margin: 30px 0;">
+        <a href="${link}" style="background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Activate Account</a>
+      </div>
+      <p>This link will expire in 24 hours.</p>
+      <p style="color: #666; font-size: 12px; margin-top: 50px;">If you didn't create an account, you can safely ignore this email.</p>
+    </div>
+  `;
+  const text = `Welcome to Krypton Drive, ${name}!\n\nPlease visit the following link to activate your account:\n${link}\n\nThis link will expire in 24 hours.`;
 
-    const result = await sendEmail({
-      to: email,
-      subject: "Activate your Krypton Drive account",
-      html,
-    });
-
-    console.log(
-      `[EmailService] Activation email sent to ${email}. Duration: ${Date.now() - start}ms`,
-    );
-    return result;
-  } catch (error) {
-    console.error(
-      `[EmailService] Failed to send activation email to ${email}. Duration: ${Date.now() - start}ms. Error: ${error.message}`,
-    );
-    throw error; // Propagate error for handling in controller
-  }
+  return sendEmail({ to, subject, html, text });
 }
 
-export async function sendPasswordResetEmail(email, resetLink) {
-  console.log(
-    `[EmailService] Preparing to send password reset email to: ${email}`,
-  );
-  const start = Date.now();
-  try {
-    const html = `
-          <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9fafb; padding: 40px; border-radius: 12px;">
-            <div style="text-align: center; margin-bottom: 32px;">
-              <h1 style="color: #111827; margin: 0; font-size: 24px; font-weight: 700;">Krypton Drive</h1>
-            </div>
-            <div style="background-color: white; padding: 32px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-              <h2 style="color: #1f2937; margin-top: 0; font-size: 20px;">Reset Your Password</h2>
-              <p style="color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
-                We received a request to reset your password. Click the button below to choose a new one.
-              </p>
-              <div style="text-align: center; margin: 32px 0;">
-                <a href="${resetLink}" style="background-color: #ef4444; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; box-shadow: 0 4px 6px -1px rgba(239, 68, 68, 0.2);">Reset Password</a>
-              </div>
-              <p style="color: #6b7280; font-size: 14px; line-height: 1.5; margin-bottom: 0;">
-                Or copy and paste this link into your browser:<br>
-                <a href="${resetLink}" style="color: #ef4444; word-break: break-all;">${resetLink}</a>
-              </p>
-              <p style="color: #9ca3af; font-size: 12px; margin-top: 24px;">
-                This link will expire in 1 hour. If you didn't request a password reset, you can safely ignore this email.
-              </p>
-            </div>
-            <div style="text-align: center; margin-top: 24px;">
-              <p style="color: #9ca3af; font-size: 12px;">
-                &copy; ${new Date().getFullYear()} Krypton Drive. All rights reserved.
-              </p>
-            </div>
-          </div>
-        `;
+/**
+ * Send Password Reset Email
+ */
+async function sendPasswordResetEmail(to, name, link) {
+  const subject = "Reset your Krypton Drive password";
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2>Hello ${name},</h2>
+      <p>You requested a password reset. Please click the button below to set a new password:</p>
+      <div style="text-align: center; margin: 30px 0;">
+        <a href="${link}" style="background-color: #EF4444; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Reset Password</a>
+      </div>
+      <p>This link will expire in 15 minutes.</p>
+      <p style="color: #666; font-size: 12px; margin-top: 50px;">If you didn't request this, please ignore this email or contact support if you have concerns.</p>
+    </div>
+  `;
+  const text = `Hello ${name},\n\nYou requested a password reset. Please visit the following link to set a new password:\n${link}\n\nThis link will expire in 15 minutes.\n\nIf you didn't request this, please ignore this email.`;
 
-    const result = await sendEmail({
-      to: email,
-      subject: "Reset your Krypton Drive password",
-      html,
-    });
-
-    console.log(
-      `[EmailService] Password reset email sent to ${email}. Duration: ${Date.now() - start}ms`,
-    );
-    return result;
-  } catch (error) {
-    console.error(
-      `[EmailService] Failed to send password reset email to ${email}. Duration: ${Date.now() - start}ms. Error: ${error.message}`,
-    );
-    throw error;
-  }
+  return sendEmail({ to, subject, html, text });
 }
 
-export async function sendAccountDeletionEmail(email, firstName) {
-  console.log(
-    `[EmailService] Preparing to send account deletion email to: ${email}`,
-  );
-  const start = Date.now();
-  try {
-    const html = `
-          <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9fafb; padding: 40px; border-radius: 12px;">
-            <div style="text-align: center; margin-bottom: 32px;">
-              <h1 style="color: #111827; margin: 0; font-size: 24px; font-weight: 700;">Krypton Drive</h1>
-            </div>
-            <div style="background-color: white; padding: 32px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-              <h2 style="color: #1f2937; margin-top: 0; font-size: 20px;">Account Deleted</h2>
-              <p style="color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
-                Hello ${firstName || "User"},
-              </p>
-              <p style="color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
-                Your account and all associated data have been permanently deleted as per your request.
-              </p>
-              <p style="color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
-                We're sorry to see you go. If you change your mind, you can always create a new account in the future.
-              </p>
-            </div>
-            <div style="text-align: center; margin-top: 24px;">
-              <p style="color: #9ca3af; font-size: 12px;">
-                &copy; ${new Date().getFullYear()} Krypton Drive. All rights reserved.
-              </p>
-            </div>
-          </div>
-        `;
+/**
+ * Send Password Changed Notification
+ */
+async function sendPasswordChangedEmail(to, name, { time, ip, userAgent }) {
+  const subject = "Your Krypton Drive password has been changed";
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2>Hello ${name},</h2>
+      <p>Your password was successfully changed.</p>
+      <div style="background-color: #f3f4f6; padding: 15px; border-radius: 4px; margin: 20px 0;">
+        <p style="margin: 5px 0;"><strong>Time:</strong> ${time}</p>
+        <p style="margin: 5px 0;"><strong>IP Address:</strong> ${ip}</p>
+        <p style="margin: 5px 0;"><strong>Device:</strong> ${userAgent}</p>
+      </div>
+      <p>If this wasn't you, please contact support immediately.</p>
+    </div>
+  `;
+  const text = `Hello ${name},\n\nYour password was successfully changed.\n\nTime: ${time}\nIP Address: ${ip}\nDevice: ${userAgent}\n\nIf this wasn't you, please contact support immediately.`;
 
-    const result = await sendEmail({
-      to: email,
-      subject: "Your Krypton Drive account has been deleted",
-      html,
-    });
-
-    console.log(
-      `[EmailService] Account deletion email sent to ${email}. Duration: ${Date.now() - start}ms`,
-    );
-    return result;
-  } catch (error) {
-    console.error(
-      `[EmailService] Failed to send account deletion email to ${email}. Duration: ${Date.now() - start}ms. Error: ${error.message}`,
-    );
-    throw error;
-  }
+  return sendEmail({ to, subject, html, text });
 }
 
-export async function send2FAEmail(email, code) {
-  console.log(`[EmailService] Preparing to send 2FA code to: ${email}`);
-  const start = Date.now();
-  try {
-    const html = `
-        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9fafb; padding: 40px; border-radius: 12px;">
-          <div style="text-align: center; margin-bottom: 32px;">
-            <h1 style="color: #111827; margin: 0; font-size: 24px; font-weight: 700;">Krypton Drive</h1>
-          </div>
-          <div style="background-color: white; padding: 32px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-            <h2 style="color: #1f2937; margin-top: 0; font-size: 20px;">Two-Factor Authentication</h2>
-            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
-              Your verification code is:
-            </p>
-            <div style="text-align: center; margin: 32px 0;">
-              <span style="background-color: #f3f4f6; color: #1f2937; padding: 12px 24px; font-size: 32px; font-family: monospace; letter-spacing: 4px; border-radius: 8px; font-weight: 700; border: 1px solid #e5e7eb;">${code}</span>
-            </div>
-            <p style="color: #6b7280; font-size: 14px; line-height: 1.5; margin-bottom: 0;">
-              This code will expire in 10 minutes. Do not share this code with anyone.
-            </p>
-          </div>
-          <div style="text-align: center; margin-top: 24px;">
-            <p style="color: #9ca3af; font-size: 12px;">
-              &copy; ${new Date().getFullYear()} Krypton Drive. All rights reserved.
-            </p>
-          </div>
-        </div>
-      `;
+/**
+ * Send Account Deletion Confirmation
+ */
+async function sendAccountDeletionEmail(to, name) {
+  const subject = "Your Krypton Drive account has been deleted";
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2>Goodbye ${name},</h2>
+      <p>Your account and all associated data have been permanently deleted as requested.</p>
+      <p>We're sorry to see you go. If you change your mind, you're always welcome to create a new account.</p>
+    </div>
+  `;
+  const text = `Goodbye ${name},\n\nYour account and all associated data have been permanently deleted as requested.\n\nWe're sorry to see you go.`;
 
-    const result = await sendEmail({
-      to: email,
-      subject: "Your 2FA Verification Code",
-      html,
-    });
-
-    console.log(
-      `[EmailService] 2FA email sent to ${email}. Duration: ${Date.now() - start}ms`,
-    );
-    return result;
-  } catch (error) {
-    console.error(
-      `[EmailService] Failed to send 2FA email to ${email}. Duration: ${Date.now() - start}ms. Error: ${error.message}`,
-    );
-    throw error;
-  }
+  return sendEmail({ to, subject, html, text });
 }
 
-export async function sendPasswordChangedEmail(email, firstName, details) {
-  console.log(`[EmailService] Sending password changed notice to: ${email}`);
-  const start = Date.now();
-  try {
-    const html = `
-        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9fafb; padding: 40px; border-radius: 12px;">
-          <div style="text-align: center; margin-bottom: 32px;">
-             <h1 style="color: #111827; margin: 0; font-size: 24px; font-weight: 700;">Krypton Drive</h1>
-          </div>
-          <div style="background-color: white; padding: 32px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-            <h2 style="color: #1f2937; margin-top: 0; font-size: 20px;">Security Alert</h2>
-            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
-              Hello ${firstName || "User"},
-            </p>
-            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
-              The password for your Krypton Drive account was successfully changed.
-            </p>
-            <div style="background-color: #f3f4f6; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
-               <p style="margin: 0; color: #4b5563; font-size: 14px;"><strong>Time:</strong> ${details.time}</p>
-               <p style="margin: 4px 0 0; color: #4b5563; font-size: 14px;"><strong>IP Address:</strong> ${details.ip}</p>
-            </div>
-             <p style="color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
-              If you did not make this change, please contact support immediately.
-            </p>
-          </div>
-          <div style="text-align: center; margin-top: 24px;">
-            <p style="color: #9ca3af; font-size: 12px;">
-              &copy; ${new Date().getFullYear()} Krypton Drive. All rights reserved.
-            </p>
-          </div>
-        </div>
-      `;
-
-    const result = await sendEmail({
-      to: email,
-      subject: "Your Krypton Drive password was changed",
-      html,
-    });
-    console.log(
-      `[EmailService] Password changed email sent to ${email}. Duration: ${Date.now() - start}ms`,
-    );
-    return result;
-  } catch (error) {
-    console.error(
-      `[EmailService] Failed to send password changed email to ${email}. Duration: ${Date.now() - start}ms. Error: ${error.message}`,
-    );
-  }
-}
+export {
+  sendEmail,
+  sendActivationEmail,
+  sendPasswordResetEmail,
+  sendPasswordChangedEmail,
+  sendAccountDeletionEmail,
+};
