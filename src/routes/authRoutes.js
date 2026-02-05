@@ -137,35 +137,27 @@ router.post(
       }
       const activationLink = `${baseUrl}/activate?token=${activationToken}`;
 
-      console.log(`[Register][${requestId}] Sending activation email...`);
-      console.time(`[Register][${requestId}] Email Send`);
+      console.log(`[Register][${requestId}] Sending activation email (Background)...`);
+      
+      // Fire-and-forget email sending
+      sendActivationEmail(email, firstName, activationLink)
+        .then(() => {
+          console.log(`[Register][${requestId}] Email sent successfully.`);
+          emailSendTotal.inc({ status: "success" });
+        })
+        .catch((emailErr) => {
+          console.error(
+            `[Register][${requestId}] Activation email failed:`,
+            emailErr.message,
+          );
+          // Log the link so admin can manually activate if needed
+          console.log(
+            `[Register][${requestId}] MANUAL ACTIVATION LINK: ${activationLink}`,
+          );
+          emailSendTotal.inc({ status: "failed" });
+        });
 
-      // Add timeout race for email sending (increased to 60s)
-      const emailPromise = sendActivationEmail(
-        email,
-        firstName,
-        activationLink,
-      );
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Email sending timed out")), 60000),
-      );
-
-      try {
-        await Promise.race([emailPromise, timeoutPromise]);
-        console.log(`[Register][${requestId}] Email sent successfully.`);
-        emailSendTotal.inc({ status: "success" });
-      } catch (emailErr) {
-        console.error(
-          `[Register][${requestId}] Activation email failed:`,
-          emailErr.message,
-        );
-        // Log the link so admin can manually activate if needed
-        console.log(
-          `[Register][${requestId}] MANUAL ACTIVATION LINK: ${activationLink}`,
-        );
-        emailSendTotal.inc({ status: "failed" });
-      }
-      console.timeEnd(`[Register][${requestId}] Email Send`);
+      // No console.timeEnd for email since it's async now
 
       const payload = {
         message:
