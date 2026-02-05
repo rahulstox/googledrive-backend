@@ -51,6 +51,13 @@ describe("Email Service (Nodemailer)", () => {
         user: "test@krypton.com",
         pass: "password",
       },
+      family: 4,
+      tls: {
+        rejectUnauthorized: false,
+      },
+      connectionTimeout: 10000,
+      greetingTimeout: 5000,
+      socketTimeout: 10000,
     });
   });
 

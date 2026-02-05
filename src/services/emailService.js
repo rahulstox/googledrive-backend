@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
 // Validate essential configuration
 const SMTP_HOST = process.env.SMTP_HOST || "smtp.gmail.com";
@@ -6,12 +7,23 @@ const SMTP_PORT = parseInt(process.env.SMTP_PORT || "587", 10);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 
-if (!SMTP_USER || !SMTP_PASS) {
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const RESEND_FROM = process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev";
+
+if (!RESEND_API_KEY && (!SMTP_USER || !SMTP_PASS)) {
   console.error(
-    "[EmailService] CRITICAL: Missing SMTP_USER or SMTP_PASS. Emails will not send.",
+    "[EmailService] CRITICAL: Missing email credentials (SMTP or Resend). Emails will not send.",
   );
 }
 
+// Resend Client
+let resendClient = null;
+if (RESEND_API_KEY) {
+  resendClient = new Resend(RESEND_API_KEY);
+  console.log("[EmailService] Using Resend API for email delivery.");
+}
+
+// Nodemailer Transporter (Fallback or Primary if Resend missing)
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
@@ -20,20 +32,54 @@ const transporter = nodemailer.createTransport({
     user: SMTP_USER,
     pass: SMTP_PASS,
   },
+  // Optimization for Gmail/Render: Force IPv4 and relax TLS if needed
+  family: 4,
+  tls: {
+    rejectUnauthorized: false,
+  },
+  // Connection timeout settings
+  connectionTimeout: 10000, // 10 seconds
+  greetingTimeout: 5000, // 5 seconds
+  socketTimeout: 10000, // 10 seconds
 });
 
 const EMAIL_FROM = process.env.SMTP_FROM || SMTP_USER;
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@kryptondrive.com";
 
 /**
- * Send an email using Nodemailer (Gmail SMTP)
+ * Send an email using Resend or Nodemailer
  * @param {string} to - Recipient email
  * @param {string} subject - Email subject
  * @param {string} html - HTML content
  * @param {string} text - Plain text content (optional)
- * @returns {Promise<object>} - Nodemailer response
+ * @returns {Promise<object>} - Response
  */
 async function sendEmail({ to, subject, html, text }) {
+  const plainText = text || html.replace(/<[^>]*>?/gm, "");
+
+  // Priority 1: Resend API (if configured)
+  if (resendClient) {
+    try {
+      const data = await resendClient.emails.send({
+        from: RESEND_FROM,
+        to,
+        subject,
+        html,
+        text: plainText,
+      });
+      console.log(
+        `[EmailService] (Resend) Email sent to ${to}. ID: ${data.id}`,
+      );
+      return data;
+    } catch (err) {
+      console.error(
+        `[EmailService] (Resend) Failed: ${err.message}. Falling back to SMTP...`,
+      );
+      // Proceed to SMTP fallback
+    }
+  }
+
+  // Priority 2: Nodemailer (SMTP)
   const MAX_RETRIES = 3;
   let attempt = 0;
 
@@ -44,17 +90,17 @@ async function sendEmail({ to, subject, html, text }) {
         to,
         subject,
         html,
-        text: text || html.replace(/<[^>]*>?/gm, ""), // Fallback text generation
+        text: plainText,
       });
 
       console.log(
-        `[EmailService] Email sent to ${to}. MessageId: ${info.messageId} (Attempt ${attempt + 1})`,
+        `[EmailService] (SMTP) Email sent to ${to}. MessageId: ${info.messageId} (Attempt ${attempt + 1})`,
       );
       return info;
     } catch (err) {
       attempt++;
       console.error(
-        `[EmailService] Attempt ${attempt} failed sending to ${to}: ${err.message}`,
+        `[EmailService] (SMTP) Attempt ${attempt} failed sending to ${to}: ${err.message}`,
       );
 
       if (attempt >= MAX_RETRIES) {
