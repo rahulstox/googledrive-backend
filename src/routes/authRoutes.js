@@ -715,12 +715,13 @@ router.delete("/me", authenticate, async (req, res) => {
       },
     );
 
-    // 4. Send Email
-    try {
-      await sendAccountDeletionEmail(user.email, user.firstName);
-    } catch (emailErr) {
-      console.error(`${logPrefix} Failed to send email:`, emailErr);
-    }
+    // 4. Send Email (Fire-and-forget)
+    sendAccountDeletionEmail(user.email, user.firstName).catch((err) =>
+      console.error(
+        `${logPrefix} Failed to send email (non-critical):`,
+        err.message,
+      ),
+    );
 
     res.json({
       message: "Account and all associated data permanently deleted.",
