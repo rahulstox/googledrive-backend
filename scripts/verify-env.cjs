@@ -14,8 +14,7 @@ const REQUIRED_VARS = [
   'SMTP_PORT',
   'SMTP_USER',
   'SMTP_PASS',
-  'DOMAIN_URL',
-  'REDIS_URL'
+  'DOMAIN_URL'
 ];
 
 // Load env vars (simulate loading if running in a context where they are not set, 
