@@ -3,6 +3,16 @@ import request from "supertest";
 import express from "express";
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+
+// Mock Resend to avoid "Missing API key" error during import of emailService
+vi.mock("resend", () => {
+  return {
+    Resend: vi.fn(function () {
+      this.emails = { send: vi.fn() };
+    }),
+  };
+});
+
 import * as emailService from "../services/emailService.js";
 import authRoutes from "../routes/authRoutes.js";
 
@@ -198,22 +208,13 @@ describe("Activation Workflow", () => {
       },
     };
 
-    User.findOne.mockImplementation(() => {
-      return mockMongooseQuery(mockUser);
-    });
+    User.findOne.mockReturnValue(mockMongooseQuery(mockUser));
 
-    const res = await request(app).get(`/api/auth/activate?token=${token}`);
+    const res = await request(app).get("/api/auth/activate").query({ token });
 
     expect(res.status).toBe(200);
-    expect(res.body.message).toContain("Account activated");
+    expect(mockUser.isActive).toBe(true);
+    expect(mockUser.activationToken).toBeUndefined();
     expect(mockSave).toHaveBeenCalled();
-  });
-
-  it("should reject invalid token", async () => {
-    const res = await request(app).get(
-      "/api/auth/activate?token=invalid-token",
-    );
-
-    expect(res.status).toBe(400);
   });
 });

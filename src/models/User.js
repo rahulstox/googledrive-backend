@@ -43,7 +43,7 @@ const userSchema = new mongoose.Schema(
     },
     isActive: {
       type: Boolean,
-      default: true,
+      default: false, // Default to false for security
     },
     activationToken: {
       type: String,
@@ -64,17 +64,26 @@ const userSchema = new mongoose.Schema(
       min: 1,
       max: 365,
     },
+    storageUsed: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    storageLimit: {
+      type: Number,
+      default: 1073741824, // 1GB in bytes
+      min: 0,
+    },
   },
   { timestamps: true },
 );
 
 // Composite indexes for performance
 userSchema.index({ email: 1, isActive: 1 });
-userSchema.index({ activationToken: 1 });
 
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password") || !this.password) return next();
-  const salt = await bcrypt.genSalt(10); // Reduced from 12 for performance (still secure)
+  const salt = await bcrypt.genSalt(12); // Increased to 12 for better security
   this.password = await bcrypt.hash(this.password, salt);
   next();
 });

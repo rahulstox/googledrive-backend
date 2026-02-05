@@ -4,6 +4,15 @@ import { app } from "../app.js";
 import { cleanupTrash } from "../services/cronService.js";
 import { softDeleteFile } from "../services/fileService.js";
 
+// Mock Resend to avoid "Missing API key" error
+vi.mock("resend", () => {
+  return {
+    Resend: vi.fn(function () {
+      this.emails = { send: vi.fn() };
+    }),
+  };
+});
+
 // Mock dependencies
 vi.mock("multer-s3", () => ({
   default: vi.fn().mockReturnValue({
@@ -77,6 +86,7 @@ vi.mock("../models/User.js", () => {
     default: {
       find: vi.fn(),
       findById: vi.fn(),
+      findByIdAndUpdate: vi.fn(),
       save: vi.fn(),
     },
   };

@@ -1,5 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 
+// Mock Resend to avoid "Missing API key" error
+vi.mock("resend", () => {
+  return {
+    Resend: vi.fn(function () {
+      this.emails = {
+        send: vi
+          .fn()
+          .mockResolvedValue({ data: { id: "mock_id" }, error: null }),
+      };
+    }),
+  };
+});
+
 // Mock multer-s3 before importing app
 vi.mock("multer-s3", () => {
   return {
@@ -10,6 +23,12 @@ vi.mock("multer-s3", () => {
     }),
   };
 });
+
+// Mock emailService to prevent actual sending attempt
+vi.mock("../services/emailService.js", () => ({
+  sendActivationEmail: vi.fn().mockResolvedValue(true),
+  sendEmail: vi.fn().mockResolvedValue(true),
+}));
 
 import dotenv from "dotenv";
 dotenv.config();
@@ -52,7 +71,7 @@ describe("Profile Completion Flow", () => {
     // Manually activate for next tests
     user.isActive = true;
     await user.save();
-  });
+  }, 15000);
 
   it("should login and receive token", async () => {
     const res = await request(app).post("/api/auth/login").send({

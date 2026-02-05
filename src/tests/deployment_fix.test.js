@@ -5,6 +5,15 @@ import User from "../models/User.js";
 import PasswordResetToken from "../models/PasswordResetToken.js";
 import * as emailService from "../services/emailService.js";
 
+// Mock Resend to avoid "Missing API key" error
+vi.mock("resend", () => {
+  return {
+    Resend: vi.fn(function () {
+      this.emails = { send: vi.fn() };
+    }),
+  };
+});
+
 // Mock dependencies
 vi.mock("../models/User.js");
 vi.mock("../models/PasswordResetToken.js");

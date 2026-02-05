@@ -5,18 +5,14 @@ const required = [
   "AWS_SECRET_ACCESS_KEY",
   "AWS_REGION",
   "S3_BUCKET_NAME",
-  "SMTP_HOST",
-  "SMTP_USER",
-  "SMTP_PASS",
 ];
 
 const optionalWithDefaults = {
   PORT: "5000",
   NODE_ENV: "development",
   JWT_EXPIRES_IN: "7d",
-  SMTP_PORT: "587",
   FRONTEND_URL: "http://localhost:5173",
-  EMAIL_FROM: null,
+  RESEND_FROM_EMAIL: "onboarding@resend.dev",
 };
 
 function validateEnv() {
@@ -67,15 +63,8 @@ function validateEnv() {
     process.exit(1);
   }
 
-  const port = process.env.SMTP_PORT || optionalWithDefaults.SMTP_PORT;
-  const portNum = parseInt(port, 10);
-  if (Number.isNaN(portNum) || portNum < 1 || portNum > 65535) {
-    console.error("[ENV] SMTP_PORT must be a number between 1 and 65535");
-    process.exit(1);
-  }
-
   console.log(
-    "[ENV] Required variables present and valid (MongoDB, JWT, AWS S3, SMTP, FRONTEND_URL).",
+    "[ENV] Required variables present and valid (MongoDB, JWT, AWS S3, Resend, FRONTEND_URL).",
   );
 }
 

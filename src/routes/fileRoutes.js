@@ -2,7 +2,11 @@ import { Router } from "express";
 import multer from "multer";
 import multerS3 from "multer-s3";
 import File from "../models/File.js";
+import User from "../models/User.js";
 import { protect } from "../middleware/auth.js";
+import { randomUUID } from "crypto";
+import fs from "fs";
+import os from "os";
 import {
   getS3Key,
   uploadToS3,
@@ -21,6 +25,23 @@ import {
 const router = Router();
 router.use(protect);
 
+// Pre-upload quota check (best effort)
+const checkQuota = async (req, res, next) => {
+  try {
+    const contentLength = parseInt(req.headers["content-length"] || "0", 10);
+    if (contentLength > 0) {
+      if (req.user.storageUsed + contentLength > req.user.storageLimit) {
+        // Drain request stream to prevent client ECONNRESET
+        req.resume();
+        return res.status(403).json({ message: "Storage quota exceeded." });
+      }
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
+};
+
 const upload = multer({
   storage: multerS3({
     s3: s3Client,
@@ -28,16 +49,36 @@ const upload = multer({
     contentType: multerS3.AUTO_CONTENT_TYPE,
     acl: "private",
     key: function (req, file, cb) {
-      const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-      // Upload to a temp folder
-      cb(null, `temp/${req.user.id}/${uniqueSuffix}-${file.originalname}`);
+      // Use UUID for S3 key - Flat structure, immutable
+      const fileId = randomUUID();
+      const s3Key = `uploads/${req.user.id}/${fileId}`;
+      cb(null, s3Key);
     },
   }),
   limits: { fileSize: 5 * 1024 * 1024 * 1024 }, // 5GB limit
   fileFilter: (req, file, cb) => {
-    // Allow all file types
     cb(null, true);
   },
+});
+
+const uploadLocal = multer({ dest: os.tmpdir() });
+
+router.get("/storage", async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select(
+      "storageUsed storageLimit",
+    );
+    res.json({
+      used: user.storageUsed,
+      limit: user.storageLimit,
+      percent:
+        user.storageLimit > 0
+          ? (user.storageUsed / user.storageLimit) * 100
+          : 0,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch storage info." });
+  }
 });
 
 router.get("/search", async (req, res) => {
@@ -112,18 +153,27 @@ router.post("/folder", async (req, res) => {
           type: "folder",
         })
       : null;
+
     const folderName = name.trim();
-    const s3Key = (
-      parentDoc
-        ? `${parentDoc.s3Key}/${folderName}`
-        : getS3Key(req.user.id, folderName)
-    ).replace(/\/+/g, "/");
-    const existing = await File.findOne({ userId: req.user.id, s3Key });
+
+    // Check for existing folder with same name in same parent
+    const existing = await File.findOne({
+      userId: req.user.id,
+      name: folderName,
+      type: "folder",
+      parentId: parentDoc?._id || null,
+      isTrash: false,
+    });
+
     if (existing) {
       return res
         .status(400)
         .json({ message: "A folder with this name already exists here." });
     }
+
+    // For folders, s3Key is virtual/identifier, we use UUID
+    const s3Key = `folders/${req.user.id}/${randomUUID()}`;
+
     const folder = await File.create({
       name: folderName,
       type: "folder",
@@ -137,11 +187,19 @@ router.post("/folder", async (req, res) => {
   }
 });
 
-router.post("/upload", upload.single("file"), async (req, res) => {
+router.post("/upload", checkQuota, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ message: "No file uploaded." });
     }
+
+    // Post-upload quota check (exact size)
+    // If exceeded, delete file and revert
+    if (req.user.storageUsed + req.file.size > req.user.storageLimit) {
+      await deleteFromS3(req.file.key);
+      return res.status(403).json({ message: "Storage quota exceeded." });
+    }
+
     const baseParentId = req.body.parentId || null;
     const parentDoc = baseParentId
       ? await File.findOne({
@@ -151,6 +209,8 @@ router.post("/upload", upload.single("file"), async (req, res) => {
         })
       : null;
 
+    // Handle relative path upload (if provided) - simplified for new system
+    // We only care about creating the folder structure in DB
     const rawRel =
       typeof req.body.relativePath === "string" ? req.body.relativePath : "";
     let rel = rawRel
@@ -162,50 +222,50 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       rel = rel === "." || rel === "./" ? "" : rel.replace(/^\.\/+/, "").trim();
     }
 
-    const rootPrefix = `users/${req.user.id}`;
-    const baseKey = (parentDoc ? parentDoc.s3Key : rootPrefix).replace(
-      /\/+$/g,
-      "",
-    );
-
     const parts = rel ? rel.split("/").filter((p) => p && p !== ".") : [];
     const relFileName = parts.length
       ? parts[parts.length - 1]
       : req.file.originalname;
-    const safeFileName = relFileName.replace(/[^a-zA-Z0-9._-]/g, "_");
     const dirParts = parts.slice(0, -1);
 
     let currentParentId = parentDoc?._id || null;
-    let currentKey = baseKey;
 
+    // Create folders if they don't exist
     for (const dirNameRaw of dirParts) {
-      const dirName = dirNameRaw.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const dirName = dirNameRaw; // No need to sanitize for S3 anymore
       if (!dirName || dirName === ".") continue;
-      const folderKey = `${currentKey}/${dirName}`.replace(/\/+/g, "/");
+
       let folder = await File.findOne({
         userId: req.user.id,
-        s3Key: folderKey,
+        name: dirName,
         type: "folder",
+        parentId: currentParentId,
       });
+
       if (!folder) {
         folder = await File.create({
           name: dirName,
           type: "folder",
-          s3Key: folderKey,
+          s3Key: `folders/${req.user.id}/${randomUUID()}`,
           parentId: currentParentId,
           userId: req.user.id,
         });
       }
       currentParentId = folder._id;
-      currentKey = folder.s3Key;
     }
 
+    // Check for duplicate filename in destination
     let finalFileName = relFileName;
-    let s3Key = `${currentKey}/${safeFileName}`.replace(/\/+/g, "/");
-
-    // Handle duplicate filenames
     let counter = 1;
-    while (await File.exists({ s3Key })) {
+
+    while (
+      await File.exists({
+        userId: req.user.id,
+        parentId: currentParentId,
+        name: finalFileName,
+        isTrash: false,
+      })
+    ) {
       const dotIndex = relFileName.lastIndexOf(".");
       let base, ext;
       if (dotIndex > 0) {
@@ -216,30 +276,28 @@ router.post("/upload", upload.single("file"), async (req, res) => {
         ext = "";
       }
       finalFileName = `${base} (${counter})${ext}`;
-      const newSafeName = finalFileName.replace(/[^a-zA-Z0-9._-]/g, "_");
-      s3Key = `${currentKey}/${newSafeName}`.replace(/\/+/g, "/");
       counter++;
     }
 
-    // File is already uploaded to temp location by multer-s3
-    const tempKey = req.file.key;
-
-    // Move from temp to final location
-    await copyInS3(tempKey, s3Key);
-    await deleteFromS3(tempKey);
-
+    // Create File Record
     const file = await File.create({
       name: finalFileName,
       type: "file",
-      s3Key,
+      s3Key: req.file.key, // Already uploaded to final UUID location
       size: req.file.size,
       mimeType: req.file.mimetype || req.file.contentType,
       parentId: currentParentId,
       userId: req.user.id,
     });
+
+    // Update User Storage Usage
+    await User.findByIdAndUpdate(req.user.id, {
+      $inc: { storageUsed: req.file.size },
+    });
+
     res.status(201).json(file);
   } catch (err) {
-    // If we fail after upload but before DB save, try to clean up temp file
+    // Cleanup if DB insert fails
     if (req.file && req.file.key) {
       try {
         await deleteFromS3(req.file.key);
@@ -431,9 +489,11 @@ router.post("/:id/move", async (req, res) => {
     }
     const newParentId =
       parentId === "root" || parentId === "" ? null : parentId;
+
     if (String(item.parentId || "") === String(newParentId || "")) {
       return res.json(item);
     }
+
     let newParent = null;
     if (newParentId) {
       newParent = await File.findOne({
@@ -449,6 +509,7 @@ router.post("/:id/move", async (req, res) => {
       if (String(newParent._id) === String(item._id)) {
         return res.status(400).json({ message: "Cannot move into itself." });
       }
+      // Check for cycles
       const ancestorIds = [];
       let a = newParent.parentId;
       while (a) {
@@ -462,174 +523,190 @@ router.post("/:id/move", async (req, res) => {
           .json({ message: "Cannot move folder into its own descendant." });
       }
     }
-    const rootPrefix = `users/${req.user.id}`;
-    const newBaseKey = newParent ? newParent.s3Key : rootPrefix;
-    const newS3Key = `${newBaseKey}/${item.name}`.replace(/\/+/g, "/");
+
+    // Check name collision in destination
     const existing = await File.findOne({
       userId: req.user.id,
-      s3Key: newS3Key,
+      parentId: newParentId,
+      name: item.name,
+      isTrash: false,
     });
+
     if (existing) {
       return res.status(400).json({
         message: "An item with this name already exists in the destination.",
       });
     }
-    if (item.type === "file") {
-      await copyInS3(item.s3Key, newS3Key);
-      await deleteFromS3(item.s3Key);
-      item.s3Key = newS3Key;
-      item.parentId = newParent?._id || null;
-      await item.save();
-      return res.json(item);
-    }
-    const escapedOld = item.s3Key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const allDescendants = await File.find({
-      userId: req.user.id,
-      $or: [{ parentId: item._id }, { s3Key: new RegExp(`^${escapedOld}/`) }],
-    }).sort({ s3Key: 1 });
-    const updates = [{ doc: item, newKey: newS3Key }];
-    for (const d of allDescendants) {
-      const rel = d.s3Key.slice(item.s3Key.length).replace(/^\/+/, "");
-      updates.push({
-        doc: d,
-        newKey: `${newS3Key}/${rel}`.replace(/\/+/g, "/"),
-      });
-    }
-    for (const { doc, newKey } of updates) {
-      if (doc.type === "file") {
-        await copyInS3(doc.s3Key, newKey);
-        await deleteFromS3(doc.s3Key);
-      }
-    }
-    const keyToParentId = new Map();
-    keyToParentId.set(newBaseKey, newParent?._id || null);
-    for (const { doc, newKey } of updates.sort((a, b) =>
-      a.newKey.localeCompare(b.newKey),
-    )) {
-      const parentPath = newKey.split("/").slice(0, -1).join("/");
-      doc.s3Key = newKey;
-      doc.parentId = keyToParentId.get(parentPath) ?? null;
-      await doc.save();
-      keyToParentId.set(newKey, doc._id);
-    }
-    const updated = await File.findOne({ _id: item._id, userId: req.user.id });
-    res.json(updated);
+
+    // Move is now DB-only (S3 key is immutable)
+    item.parentId = newParentId;
+    await item.save();
+
+    res.json(item);
   } catch (err) {
     res.status(500).json({ message: err.message || "Move failed." });
   }
 });
 
-router.post("/upload-zip", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file || !req.file.originalname.toLowerCase().endsWith(".zip")) {
-      return res.status(400).json({ message: "Please upload a .zip file." });
-    }
-    const AdmZip = (await import("adm-zip")).default;
-    const parentId = req.body.parentId || null;
-    let prefix = "";
-    if (parentId) {
-      const parent = await File.findOne({ _id: parentId, userId: req.user.id });
-      if (parent) prefix = parent.s3Key + "/";
-    }
-    const zip = new AdmZip(req.file.buffer);
-    const entries = zip.getEntries();
-    const created = [];
-    const folderIds = { "": null };
-    for (const entry of entries) {
-      const rawName = entry.entryName.replace(/\/$/, "");
-      const parts = rawName.split("/").filter(Boolean);
-      if (entry.isDirectory) {
-        let path = "";
-        for (let i = 0; i < parts.length; i++) {
-          path += (path ? "/" : "") + parts[i];
-          if (!folderIds[path]) {
-            const parentPath = parts.slice(0, i).join("/");
-            const parentFolderId = folderIds[parentPath];
-            const s3Key = getS3Key(req.user.id, prefix + path);
-            const existing = await File.findOne({ userId: req.user.id, s3Key });
-            if (!existing) {
-              const folder = await File.create({
-                name: parts[i],
+router.post(
+  "/upload-zip",
+  checkQuota,
+  uploadLocal.single("file"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: "Please upload a .zip file." });
+      }
+
+      const AdmZip = (await import("adm-zip")).default;
+      // Read file into buffer to avoid file locking issues on Windows
+      const zipBuffer = fs.readFileSync(req.file.path);
+      const zip = new AdmZip(zipBuffer);
+      const entries = zip.getEntries();
+
+      // 1. Calculate total uncompressed size
+      let totalSize = 0;
+      for (const entry of entries) {
+        if (!entry.isDirectory) {
+          totalSize += entry.header.size;
+        }
+      }
+
+      // 2. Check quota (uncompressed)
+      if (req.user.storageUsed + totalSize > req.user.storageLimit) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (e) {
+          console.warn("Failed to delete temp zip:", e.message);
+        }
+        return res
+          .status(403)
+          .json({ message: "Storage quota exceeded (uncompressed size)." });
+      }
+
+      // 3. Process entries
+      const parentId = req.body.parentId || null;
+      let createdCount = 0;
+      const pathMap = new Map(); // "path/to/folder" -> folderId
+      pathMap.set("", parentId);
+
+      // Helper to ensure path exists in DB
+      const ensurePath = async (entryPath) => {
+        const parts = entryPath.split("/").filter(Boolean);
+        let currentPath = "";
+        let currentParentId = parentId;
+
+        for (const part of parts) {
+          const nextPath = currentPath ? `${currentPath}/${part}` : part;
+          if (pathMap.has(nextPath)) {
+            currentParentId = pathMap.get(nextPath);
+          } else {
+            // Check if folder exists in DB
+            let folder = await File.findOne({
+              name: part,
+              type: "folder",
+              parentId: currentParentId,
+              userId: req.user.id,
+              isTrash: false,
+            });
+
+            if (!folder) {
+              folder = await File.create({
+                name: part,
                 type: "folder",
-                s3Key,
-                parentId: parentFolderId,
+                s3Key: `folders/${req.user.id}/${randomUUID()}`,
+                parentId: currentParentId,
                 userId: req.user.id,
               });
-              folderIds[path] = folder._id;
-              created.push(folder);
-            } else {
-              folderIds[path] = existing._id;
             }
+
+            currentParentId = folder._id;
+            pathMap.set(nextPath, folder._id);
           }
+          currentPath = nextPath;
         }
-        continue;
-      }
-      const dirPath = parts.slice(0, -1).join("/");
-      const fileName = parts[parts.length - 1];
-      let parentFolderId = folderIds[dirPath];
-      if (dirPath && parentFolderId === undefined) {
-        let p = "";
-        for (let i = 0; i < parts.length - 1; i++) {
-          p += (p ? "/" : "") + parts[i];
-          if (!folderIds[p]) {
-            const parentPath = parts.slice(0, i).join("/");
-            const s3Key = getS3Key(req.user.id, prefix + p);
-            const existing = await File.findOne({ userId: req.user.id, s3Key });
-            if (existing) {
-              folderIds[p] = existing._id;
-            } else {
-              const folder = await File.create({
-                name: parts[i],
-                type: "folder",
-                s3Key,
-                parentId: folderIds[parentPath] || null,
-                userId: req.user.id,
-              });
-              folderIds[p] = folder._id;
-              created.push(folder);
-            }
-          }
+        return currentParentId;
+      };
+
+      const uploadedFiles = [];
+
+      for (const entry of entries) {
+        if (entry.isDirectory) {
+          await ensurePath(entry.entryName);
+          continue;
         }
-        parentFolderId = folderIds[dirPath];
+
+        // File processing
+        const entryName = entry.entryName;
+        // Skip Mac OS metadata
+        if (entryName.includes("__MACOSX") || entryName.includes(".DS_Store"))
+          continue;
+
+        const lastSlash = entryName.lastIndexOf("/");
+        const fileName =
+          lastSlash === -1 ? entryName : entryName.substring(lastSlash + 1);
+        const folderPath =
+          lastSlash === -1 ? "" : entryName.substring(0, lastSlash);
+
+        if (!fileName) continue;
+
+        const parentFolderId = await ensurePath(folderPath);
+
+        const fileId = randomUUID();
+        const s3Key = `uploads/${req.user.id}/${fileId}`;
+        const buffer = entry.getData();
+
+        await uploadToS3(s3Key, buffer, "application/octet-stream");
+
+        const file = await File.create({
+          name: fileName,
+          type: "file",
+          s3Key,
+          size: entry.header.size,
+          mimeType: "application/octet-stream",
+          parentId: parentFolderId,
+          userId: req.user.id,
+        });
+
+        uploadedFiles.push(file);
+        createdCount++;
       }
-      const filePath = (dirPath ? dirPath + "/" : "") + fileName;
-      const s3Key = getS3Key(req.user.id, prefix + filePath);
-      const data = entry.getData();
-      const mime = entry.header?.contentType || "application/octet-stream";
-      const buf = Buffer.isBuffer(data)
-        ? data
-        : Buffer.from(data || "", typeof data === "string" ? "utf8" : "latin1");
-      const size = buf.length;
-      await uploadToS3(s3Key, buf, mime);
-      const file = await File.create({
-        name: fileName,
-        type: "file",
-        s3Key,
-        size,
-        mimeType: mime,
-        parentId: parentFolderId || null,
-        userId: req.user.id,
+
+      // Update storage used
+      await User.findByIdAndUpdate(req.user.id, {
+        $inc: { storageUsed: totalSize },
       });
-      created.push(file);
+
+      // Cleanup temp zip
+      fs.unlinkSync(req.file.path);
+
+      res.status(201).json({
+        message: "Zip extracted successfully.",
+        count: createdCount,
+      });
+    } catch (err) {
+      console.error("Upload zip error:", err);
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      res.status(500).json({ message: "Zip upload or extract failed." });
     }
-    res.status(201).json({
-      message: "Zip extracted.",
-      created: created.length,
-      items: created,
-    });
-  } catch (err) {
-    console.error("Upload zip error:", err);
-    res.status(500).json({ message: "Zip upload or extract failed." });
-  }
-});
+  },
+);
 
 router.delete("/:id", async (req, res) => {
   try {
-    console.log("DELETE /:id hit. Params:", req.params, "User:", req.user);
+    const item = await File.findOne({
+      _id: req.params.id,
+      userId: req.user.id,
+    });
+    if (!item) return res.status(404).json({ message: "File not found." });
+
     const success = await deleteFilePermanently(req.params.id, req.user.id);
     if (!success) {
       return res.status(404).json({ message: "File not found." });
     }
+
     res.json({ message: "Permanently deleted." });
   } catch (err) {
     console.error("DELETE /:id error:", err);
@@ -651,15 +728,37 @@ router.post("/restore/:id", async (req, res) => {
 
 router.delete("/permanent/:id", async (req, res) => {
   try {
+    const item = await File.findOne({
+      _id: req.params.id,
+      userId: req.user.id,
+    });
+    if (!item) return res.status(404).json({ message: "File not found." });
+
     const success = await deleteFilePermanently(req.params.id, req.user.id);
     if (!success) {
       return res.status(404).json({ message: "File not found." });
     }
+
     res.json({ message: "Permanently deleted." });
   } catch (err) {
     res
       .status(500)
       .json({ message: err.message || "Permanent delete failed." });
+  }
+});
+
+router.delete("/trash/empty", async (req, res) => {
+  try {
+    const files = await File.find({ userId: req.user.id, isTrash: true });
+    let count = 0;
+    for (const file of files) {
+      if (await deleteFilePermanently(file._id, req.user.id)) {
+        count++;
+      }
+    }
+    res.json({ message: "Trash emptied.", count });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to empty trash." });
   }
 });
 
@@ -693,12 +792,6 @@ router.post("/bulk-star", async (req, res) => {
       userId: req.user.id,
     });
 
-    if (items.length === 0) {
-      return res.json({ message: "No items found." });
-    }
-
-    // Smart toggle: if any item is NOT starred, star them all.
-    // If all are starred, unstar them all.
     const anyUnstarred = items.some((item) => !item.isStarred);
     const newStatus = anyUnstarred;
 
@@ -712,120 +805,7 @@ router.post("/bulk-star", async (req, res) => {
       status: newStatus,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message || "Bulk star failed." });
-  }
-});
-
-router.post("/trash/bulk-restore", async (req, res) => {
-  try {
-    const { ids } = req.body;
-    if (!Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ message: "ids array is required." });
-    }
-    let count = 0;
-    for (const id of ids) {
-      if (await restoreFile(id, req.user.id)) {
-        count++;
-      }
-    }
-    res.json({ message: "Restored.", count });
-  } catch (err) {
-    res.status(500).json({ message: err.message || "Bulk restore failed." });
-  }
-});
-
-router.delete("/trash/bulk-permanent", async (req, res) => {
-  try {
-    const { ids } = req.body;
-    if (!Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ message: "ids array is required." });
-    }
-    let count = 0;
-    for (const id of ids) {
-      if (await deleteFilePermanently(id, req.user.id)) {
-        count++;
-      }
-    }
-    res.json({ message: "Permanently deleted.", count });
-  } catch (err) {
-    res
-      .status(500)
-      .json({ message: err.message || "Bulk permanent delete failed." });
-  }
-});
-
-router.delete("/trash/empty", async (req, res) => {
-  try {
-    const files = await File.find({ userId: req.user.id, isTrash: true });
-    let count = 0;
-    for (const file of files) {
-      if (await deleteFilePermanently(file._id, req.user.id)) {
-        count++;
-      }
-    }
-    res.json({ message: "Trash emptied.", count });
-  } catch (err) {
-    res.status(500).json({ message: err.message || "Empty trash failed." });
-  }
-});
-
-router.get("/folder/:folderId", async (req, res) => {
-  try {
-    const { folderId } = req.params;
-
-    // 1. Get the folder itself to verify existence and get details
-    const currentFolder = await File.findOne({
-      _id: folderId,
-      userId: req.user.id,
-      type: "folder",
-      isTrash: false,
-    });
-
-    if (!currentFolder) {
-      return res.status(404).json({ message: "Folder not found." });
-    }
-
-    // 2. Get items in this folder
-    const items = await File.find({
-      userId: req.user.id,
-      parentId: folderId,
-      isTrash: false,
-    })
-      .sort({ type: 1, name: 1 })
-      .lean();
-
-    // 3. Generate breadcrumbs
-    const breadcrumbs = [];
-    let curr = currentFolder;
-    while (curr) {
-      breadcrumbs.unshift({ id: curr._id, name: curr.name });
-      if (!curr.parentId) break;
-      curr = await File.findOne({
-        _id: curr.parentId,
-        userId: req.user.id,
-      }).select("_id name parentId");
-    }
-
-    res.json({ items, breadcrumbs });
-  } catch (err) {
-    console.error("Folder load error:", err);
-    res.status(500).json({ message: "Failed to load folder contents." });
-  }
-});
-
-router.get("/folders", async (req, res) => {
-  try {
-    const folders = await File.find({
-      userId: req.user.id,
-      type: "folder",
-      isTrash: false,
-    })
-      .sort({ s3Key: 1 })
-      .select("_id name parentId s3Key")
-      .lean();
-    res.json({ folders });
-  } catch (err) {
-    res.status(500).json({ message: "Failed to list folders." });
+    res.status(500).json({ message: "Failed to toggle star status." });
   }
 });
 

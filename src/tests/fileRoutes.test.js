@@ -4,6 +4,15 @@ import { app } from "../app.js";
 import { PassThrough } from "stream";
 import File from "../models/File.js";
 
+// Mock Resend to avoid "Missing API key" error
+vi.mock("resend", () => {
+  return {
+    Resend: vi.fn(function () {
+      this.emails = { send: vi.fn() };
+    }),
+  };
+});
+
 // Mock dependencies
 vi.mock("multer-s3", () => ({
   default: vi.fn().mockReturnValue({
@@ -27,11 +36,19 @@ vi.mock("multer-s3", () => ({
 
 vi.mock("../middleware/auth.js", () => ({
   protect: (req, res, next) => {
-    req.user = { id: "test_user_id" };
+    req.user = {
+      id: "test_user_id",
+      storageUsed: 0,
+      storageLimit: 1073741824,
+    };
     next();
   },
   authenticate: (req, res, next) => {
-    req.user = { id: "test_user_id" };
+    req.user = {
+      id: "test_user_id",
+      storageUsed: 0,
+      storageLimit: 1073741824,
+    };
     next();
   },
 }));
@@ -59,6 +76,15 @@ vi.mock("../services/s3Service.js", () => ({
 }));
 
 // Mock Mongoose Model
+vi.mock("../models/User.js", () => {
+  return {
+    default: {
+      findById: vi.fn(),
+      findByIdAndUpdate: vi.fn(),
+    },
+  };
+});
+
 vi.mock("../models/File.js", () => {
   const mockFile = {
     _id: "file_id",

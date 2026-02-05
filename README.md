@@ -13,19 +13,18 @@ Node.js backend for the Drive (Google Drive–style) application: auth, file/fol
 - Node.js (ES modules), Express
 - MongoDB Atlas (Mongoose)
 - AWS S3 (SDK v3, presigned URLs)
-- JWT, bcrypt, express-validator, helmet, rate-limit, nodemailer
+- JWT, bcrypt, express-validator, helmet, rate-limit, resend
 
 ## Environment verification
 
 On startup the server validates (without logging secrets):
 
-- **Required**: `MONGODB_URI`, `JWT_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET_NAME`, `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`
+- **Required**: `MONGODB_URI`, `JWT_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET_NAME`, `RESEND_API_KEY`
 - **JWT_SECRET**: must be at least 32 characters
 - **MONGODB_URI**: must start with `mongodb://` or `mongodb+srv://`
 - **FRONTEND_URL**: must be a valid http/https URL
-- **SMTP_PORT**: must be 1–65535
 
-Optional with defaults: `PORT`, `NODE_ENV`, `JWT_EXPIRES_IN`, `SMTP_PORT`, `FRONTEND_URL`, `EMAIL_FROM`.
+Optional with defaults: `PORT`, `NODE_ENV`, `JWT_EXPIRES_IN`, `FRONTEND_URL`, `RESEND_FROM_EMAIL`.
 
 **Health checks:**
 
@@ -38,9 +37,8 @@ Optional with defaults: `PORT`, `NODE_ENV`, `JWT_EXPIRES_IN`, `SMTP_PORT`, `FRON
    - `MONGODB_URI`
    - `JWT_SECRET`
    - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET_NAME`
-   - `SMTP_*` for activation and password-reset emails
+   - `RESEND_API_KEY` for activation and password-reset emails
    - `FRONTEND_URL` for CORS and email links
-   - `SMTP_SECURE` (optional): Set to "true" for port 465, or leave empty/false for port 587.
    - `REDIS_URL` (optional): Connection string for Redis caching (e.g., `redis://localhost:6379`).
 2. `npm install`
 3.4. `npm run dev` (or `npm start`)
@@ -58,12 +56,6 @@ Run the comprehensive test suite (including registration workflow, timeouts, and
 
 ```bash
 npm test src/tests/registration.test.js
-```
-
-Verify SMTP configuration:
-
-```bash
-node scripts/verify-smtp.js
 ```
 
 ## Account Deletion Workflow

@@ -3,6 +3,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 // Mock environment variables BEFORE imports
 process.env.S3_BUCKET_NAME = "test-bucket";
 
+// Mock Resend to avoid "Missing API key" error
+vi.mock("resend", () => {
+  return {
+    Resend: vi.fn(function () {
+      this.emails = { send: vi.fn() };
+    }),
+  };
+});
+
 // Mock multer-s3 to avoid bucket error
 vi.mock("multer-s3", () => {
   return {

@@ -109,9 +109,9 @@ router.post(
       const activationToken = jwt.sign(
         { email },
         process.env.JWT_SECRET || "secret",
-        { expiresIn: "24h" },
+        { expiresIn: "10m" },
       );
-      const activationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      const activationTokenExpires = new Date(Date.now() + 10 * 60 * 1000);
 
       console.log(`[Register][${requestId}] Creating user in DB...`);
       console.time(`[Register][${requestId}] DB Create`);
@@ -138,14 +138,14 @@ router.post(
       console.log(`[Register][${requestId}] Sending activation email...`);
       console.time(`[Register][${requestId}] Email Send`);
 
-      // Add timeout race for email sending (increased to 10s)
+      // Add timeout race for email sending (increased to 15s)
       const emailPromise = sendActivationEmail(
         email,
         firstName,
         activationLink,
       );
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Email sending timed out")), 10000),
+        setTimeout(() => reject(new Error("Email sending timed out")), 15000),
       );
 
       try {
@@ -283,10 +283,10 @@ router.post(
       const activationToken = jwt.sign(
         { email },
         process.env.JWT_SECRET || "secret",
-        { expiresIn: "24h" },
+        { expiresIn: "10m" },
       );
       user.activationToken = activationToken;
-      user.activationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      user.activationTokenExpires = new Date(Date.now() + 10 * 60 * 1000);
       await user.save();
 
       const baseUrl = process.env.FRONTEND_URL || "http://localhost:5173";
