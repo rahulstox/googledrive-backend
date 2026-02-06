@@ -38,7 +38,7 @@ const signToken = (id, tokenVersion = 0) =>
 // Rate limiters
 const forgotLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 5, // Limit each IP to 5 requests per windowMs
+  max: 3, // Limit each IP to 3 requests per windowMs
   message: { message: "Too many requests, please try again later." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -763,7 +763,7 @@ router.post(
         .update(resetToken)
         .digest("hex");
 
-      const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
       await PasswordResetToken.create({
         userId: user._id,
@@ -848,9 +848,7 @@ router.post(
     body("newPassword")
       .isLength({ min: 8 })
       .withMessage("Password must be at least 8 characters")
-      .matches(
-        /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
-      )
+      .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])/)
       .withMessage(
         "Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character",
       ),

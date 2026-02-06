@@ -211,10 +211,10 @@ export const sendPasswordResetEmail = async (to, username, link) => {
     </div>
     <p style="font-size: 14px; margin-top: 20px; color: #666;">Or copy and paste this link into your browser:</p>
     <p><a href="${link}" class="link-text">${link}</a></p>
-    <p style="font-size: 14px; color: #666;">This link will expire in 1 hour. If you didn't ask for this, you can ignore this email.</p>
+    <p style="font-size: 14px; color: #666;">This link will expire in 24 hours. If you didn't ask for this, you can ignore this email.</p>
   `);
 
-  const text = `Hi ${username},\n\nReset your password by clicking the link below:\n${link}\n\nThis link expires in 1 hour.`;
+  const text = `Hi ${username},\n\nReset your password by clicking the link below:\n${link}\n\nThis link expires in 24 hours.`;
 
   return sendEmail({
     to,
