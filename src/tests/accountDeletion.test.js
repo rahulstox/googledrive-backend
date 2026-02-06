@@ -70,7 +70,7 @@ describe("Account Deletion Workflow", () => {
     const mockUser = {
       _id: "user123",
       email: "inactive@example.com",
-      firstName: "Inactive",
+      username: "inactiveuser",
       isActive: false, // Inactive user
       password: "hashedPassword",
       comparePassword: vi.fn().mockResolvedValue(true),
@@ -105,7 +105,7 @@ describe("Account Deletion Workflow", () => {
     const mockUser = {
       _id: "user123",
       email: "active@example.com",
-      firstName: "Active",
+      username: "activeuser",
       isActive: true,
       password: "hashedPassword",
       comparePassword: vi.fn().mockResolvedValue(true),

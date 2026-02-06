@@ -68,7 +68,7 @@ describe("Deployment Fix Verification", () => {
     const mockUser = {
       _id: "user_123",
       email: "test@example.com",
-      firstName: "Test",
+      username: "testuser",
     };
     User.findOne.mockResolvedValue(mockUser);
     PasswordResetToken.create.mockResolvedValue({});

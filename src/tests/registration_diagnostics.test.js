@@ -65,27 +65,30 @@ describe("Registration Diagnostics", () => {
       .send({
         email: "weak_pass_" + testEmail,
         password: "short",
+        username: "weak_user",
       });
     expect(res.status).toBe(400);
     // The current backend only checks length > 8, so "short" (5 chars) should fail
   });
 
-  it("should FAIL with simple password > 8 chars (FIXED)", async () => {
-    // This test documents the behavior AFTER fix
+  it("should accept medium strength password (simple but > 8 chars)", async () => {
+    // Medium strength is now allowed
     const res = await request(app)
       .post("/api/auth/register")
       .send({
         email: "simple_pass_" + testEmail,
         password: "password123", // No uppercase, no special char
+        username: "simple_user",
       });
-    expect(res.status).toBe(400);
-    expect(res.body.errors[0].msg).toContain("Password must contain");
+    expect(res.status).toBe(201);
+    expect(res.body.message).toContain("Account created");
   });
 
   it("should successfully register with strong password", async () => {
     const res = await request(app).post("/api/auth/register").send({
       email: testEmail,
       password: testPassword,
+      username: "strong_user",
     });
     expect(res.status).toBe(201);
     expect(res.body.message).toContain("Account created");
@@ -99,11 +102,34 @@ describe("Registration Diagnostics", () => {
     expect(user.activationToken).toBeDefined();
   });
 
+  it("should successfully register without username (Auto-generation)", async () => {
+    const noUserEmail = "nouser_" + Date.now() + "@example.com";
+    const res = await request(app).post("/api/auth/register").send({
+      email: noUserEmail,
+      password: testPassword,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.message).toContain("Account created");
+
+    // Verify user has auto-generated username
+    const user = await User.findOne({ email: noUserEmail });
+    expect(user).toBeDefined();
+    expect(user.username).toBeDefined();
+    expect(user.username.length).toBeGreaterThanOrEqual(3);
+    // Should contain part of email (sanitized)
+    expect(user.username).toMatch(/nouser/);
+  });
+
   it("should fail duplicate registration (Application Layer check)", async () => {
+    // Activate the user first to ensure we hit the "Account already exists" error
+    // instead of the "Resend activation email" path
+    await User.updateOne({ email: testEmail }, { isActive: true });
+
     // Register same email again
     const res = await request(app).post("/api/auth/register").send({
       email: testEmail,
       password: testPassword,
+      username: "strong_user_dup",
     });
     expect(res.status).toBe(400);
     expect(res.body.message).toBe("An account with this email already exists.");

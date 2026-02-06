@@ -30,8 +30,7 @@ export default function () {
   const registerPayload = JSON.stringify({
     email,
     password,
-    firstName: 'Load',
-    lastName: 'Test',
+    username: 'loadtestuser',
   });
 
   const params = {

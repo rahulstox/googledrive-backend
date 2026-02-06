@@ -6,6 +6,7 @@ import rateLimit from "express-rate-limit";
 import passport from "passport";
 import authRoutes from "./routes/authRoutes.js";
 import fileRoutes from "./routes/fileRoutes.js";
+import settingsRoutes from "./routes/settingsRoutes.js";
 import { checkS3Connection } from "./services/s3Service.js";
 import mongoose from "mongoose";
 import setupPassport from "./config/passport.js";
@@ -54,6 +55,7 @@ app.use("/api/auth/forgot-password", authLimiter);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/files", fileRoutes);
+app.use("/api/settings", settingsRoutes);
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 

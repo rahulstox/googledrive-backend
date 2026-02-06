@@ -26,11 +26,12 @@ vi.mock("multer-s3", () => ({
 
 vi.mock("../middleware/auth.js", () => ({
   protect: (req, res, next) => {
-    req.user = { id: "user_id" };
+    req.user = { _id: "user123", email: "test@example.com" };
     next();
   },
+  authorize: () => (req, res, next) => next(),
   authenticate: (req, res, next) => {
-    req.user = { id: "user_id" };
+    req.user = { _id: "user123", email: "test@example.com" };
     next();
   },
 }));

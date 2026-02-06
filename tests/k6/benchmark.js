@@ -29,8 +29,7 @@ export default function () {
   const registerRes = http.post(`${BASE_URL}/auth/register`, JSON.stringify({
     email,
     password,
-    firstName: 'Bench',
-    lastName: 'Mark'
+    username: 'benchuser'
   }), {
     headers: { 'Content-Type': 'application/json' },
     tags: { type: 'register' }

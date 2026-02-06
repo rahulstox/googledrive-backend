@@ -41,6 +41,7 @@ vi.mock("../middleware/auth.js", () => ({
     req.user = mocks.user;
     next();
   },
+  authorize: () => (req, res, next) => next(),
 }));
 
 vi.mock("../models/File.js", () => ({

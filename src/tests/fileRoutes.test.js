@@ -51,6 +51,7 @@ vi.mock("../middleware/auth.js", () => ({
     };
     next();
   },
+  authorize: () => (req, res, next) => next(),
 }));
 
 vi.mock("../services/s3Service.js", () => ({

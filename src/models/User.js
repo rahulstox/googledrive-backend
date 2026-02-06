@@ -15,22 +15,29 @@ const userSchema = new mongoose.Schema(
       ],
       sparse: true,
     },
+    username: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      match: [
+        /^[A-Za-z0-9_-]{3,20}$/,
+        "Username must be 3-20 characters and can only contain letters, numbers, underscores, and hyphens",
+      ],
+    },
+    bio: {
+      type: String,
+      maxlength: [500, "Bio cannot exceed 500 characters"],
+      default: "",
+    },
+    avatarUrl: {
+      type: String,
+      default: "",
+    },
     phoneNumber: {
       type: String,
       unique: true,
       sparse: true,
-    },
-    firstName: {
-      type: String,
-      trim: true,
-      maxlength: [50, "First name cannot exceed 50 characters"],
-      default: "User",
-    },
-    lastName: {
-      type: String,
-      trim: true,
-      maxlength: [50, "Last name cannot exceed 50 characters"],
-      default: "",
     },
     password: {
       type: String,
@@ -47,6 +54,11 @@ const userSchema = new mongoose.Schema(
     isActive: {
       type: Boolean,
       default: false, // Default to false for security
+    },
+    role: {
+      type: String,
+      enum: ["user", "admin"],
+      default: "user",
     },
     activationToken: {
       type: String,
@@ -77,6 +89,40 @@ const userSchema = new mongoose.Schema(
       default: 1073741824, // 1GB in bytes
       min: 0,
     },
+    // Settings & Preferences
+    preferences: {
+      language: { type: String, default: "en" },
+      timezone: { type: String, default: "UTC" },
+      theme: {
+        type: String,
+        enum: ["light", "dark", "system"],
+        default: "system",
+      },
+      notifications: {
+        email: { type: Boolean, default: true },
+        push: { type: Boolean, default: true },
+        sms: { type: Boolean, default: false },
+      },
+      privacy: {
+        profileVisibility: {
+          type: String,
+          enum: ["public", "private", "contacts"],
+          default: "public",
+        },
+        showActivityStatus: { type: Boolean, default: true },
+      },
+    },
+    // Security
+    twoFactorEnabled: { type: Boolean, default: false },
+    twoFactorSecret: { type: String, select: false },
+    loginHistory: [
+      {
+        timestamp: { type: Date, default: Date.now },
+        ip: String,
+        device: String,
+        location: String,
+      },
+    ],
   },
   { timestamps: true },
 );

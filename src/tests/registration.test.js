@@ -52,12 +52,11 @@ describe("Registration & Activation Tests", () => {
     });
 
     it("should register a new user successfully and send activation email", async () => {
-      User.findOne.mockResolvedValue(null);
+      User.findOne.mockReturnValue(mockMongooseQuery(null));
       User.create.mockResolvedValue({
         _id: "user123",
         email: "test@example.com",
-        firstName: "Test",
-        lastName: "User",
+        username: "testuser",
       });
       emailService.sendActivationEmail.mockResolvedValue({
         messageId: "msg123",
@@ -65,8 +64,7 @@ describe("Registration & Activation Tests", () => {
 
       const res = await request(app).post("/api/auth/register").send({
         email: "test@example.com",
-        firstName: "Test",
-        lastName: "User",
+        username: "testuser",
         password: "Password123!",
       });
 
@@ -84,14 +82,13 @@ describe("Registration & Activation Tests", () => {
 
     it("should generate HTTPS link when FRONTEND_URL is https", async () => {
       process.env.FRONTEND_URL = "https://krypton.com";
-      User.findOne.mockResolvedValue(null);
+      User.findOne.mockReturnValue(mockMongooseQuery(null));
       User.create.mockResolvedValue({ _id: "u1", email: "https@test.com" });
       emailService.sendActivationEmail.mockResolvedValue({});
 
       await request(app).post("/api/auth/register").send({
         email: "https@test.com",
-        firstName: "HTTPS",
-        lastName: "Test",
+        username: "httpstest",
         password: "Password123!",
       });
 
@@ -100,7 +97,7 @@ describe("Registration & Activation Tests", () => {
     });
 
     it("should handle email sending timeout gracefully", async () => {
-      User.findOne.mockImplementation(() => mockMongooseQuery(null));
+      User.findOne.mockReturnValue(mockMongooseQuery(null));
       User.create.mockResolvedValue({ _id: "user123" });
 
       // Simulate slow email
@@ -111,8 +108,7 @@ describe("Registration & Activation Tests", () => {
       const start = Date.now();
       const res = await request(app).post("/api/auth/register").send({
         email: "timeout@example.com",
-        firstName: "Test",
-        lastName: "User",
+        username: "timeoutuser",
         password: "Password123!",
       });
       const duration = Date.now() - start;
@@ -122,14 +118,13 @@ describe("Registration & Activation Tests", () => {
     }, 10000); // Increase test timeout
 
     it("should reject existing users", async () => {
-      User.findOne.mockImplementation(() =>
-        mockMongooseQuery({ email: "existing@example.com" }),
+      User.findOne.mockReturnValue(
+        mockMongooseQuery({ email: "existing@example.com", isActive: true }),
       );
 
       const res = await request(app).post("/api/auth/register").send({
         email: "existing@example.com",
-        firstName: "Existing",
-        lastName: "User",
+        username: "existinguser",
         password: "Password123!",
       });
 
@@ -142,7 +137,7 @@ describe("Registration & Activation Tests", () => {
       const mockSave = vi.fn();
       const mockUser = {
         email: "test@example.com",
-        firstName: "Test",
+        username: "testuser",
         isActive: false,
         save: mockSave,
       };
@@ -206,9 +201,19 @@ describe("Activation Workflow", () => {
       toObject: function () {
         return this;
       },
+      getSignedJwtToken: function () {
+        return "fake-jwt-token";
+      },
     };
 
     User.findOne.mockReturnValue(mockMongooseQuery(mockUser));
+    // Mock cache service which is used in authRoutes
+    vi.mock("../services/cacheService.js", () => ({
+      cache: {
+        del: vi.fn(),
+        set: vi.fn(),
+      },
+    }));
 
     const res = await request(app).get("/api/auth/activate").query({ token });
 
@@ -216,5 +221,6 @@ describe("Activation Workflow", () => {
     expect(mockUser.isActive).toBe(true);
     expect(mockUser.activationToken).toBeUndefined();
     expect(mockSave).toHaveBeenCalled();
+    expect(res.body.token).toBe("fake-jwt-token");
   });
 });

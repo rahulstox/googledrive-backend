@@ -46,26 +46,26 @@ describe("Profile Completion Flow", () => {
 
   beforeAll(async () => {
     await connectDB();
-    await User.deleteMany({ email: testEmail });
+    await User.deleteMany({ email: { $in: [testEmail, "other@example.com"] } });
   });
 
   afterAll(async () => {
-    await User.deleteMany({ email: testEmail });
+    await User.deleteMany({ email: { $in: [testEmail, "other@example.com"] } });
     await mongoose.connection.close();
   });
 
-  it("should register a user without names (defaults used)", async () => {
+  it("should register a user with username", async () => {
     const res = await request(app).post("/api/auth/register").send({
       email: testEmail,
       password: testPassword,
+      username: "testuser",
     });
 
     expect(res.status).toBe(201);
 
     const user = await User.findOne({ email: testEmail });
     expect(user).toBeDefined();
-    expect(user.firstName).toBe("User");
-    expect(user.lastName).toBe("");
+    expect(user.username).toBe("testuser");
     expect(user.isActive).toBe(false);
 
     // Manually activate for next tests
@@ -84,26 +84,57 @@ describe("Profile Completion Flow", () => {
     token = res.body.token;
 
     // Check returned user object
-    expect(res.body.user.firstName).toBe("User");
-    expect(res.body.user.lastName).toBe("");
+    expect(res.body.user.username).toBe("testuser");
   });
 
-  it("should update profile names via PUT /me", async () => {
+  it("should update profile username via PUT /me", async () => {
     const res = await request(app)
       .put("/api/auth/me")
       .set("Authorization", `Bearer ${token}`)
       .send({
-        firstName: "John",
-        lastName: "Doe",
+        username: "newusername",
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.user.firstName).toBe("John");
-    expect(res.body.user.lastName).toBe("Doe");
+    expect(res.body.user.username).toBe("newusername");
 
     // Verify in DB
     const user = await User.findOne({ email: testEmail });
-    expect(user.firstName).toBe("John");
-    expect(user.lastName).toBe("Doe");
+    expect(user.username).toBe("newusername");
+  });
+
+  it("should fail validation for invalid username", async () => {
+    const res = await request(app)
+      .put("/api/auth/me")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        username: "ab", // Too short
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toBeDefined();
+  });
+
+  it("should fail for duplicate username", async () => {
+    // Create another user
+    await User.create({
+      email: "other@example.com",
+      password: "Password123!",
+      username: "taken_user",
+      isActive: true,
+    });
+
+    const res = await request(app)
+      .put("/api/auth/me")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        username: "taken_user",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/taken/i);
+
+    // Cleanup
+    await User.deleteOne({ email: "other@example.com" });
   });
 });

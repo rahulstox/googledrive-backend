@@ -40,6 +40,7 @@ describe("Activation Cache Invalidation", () => {
       activationToken: "valid-token",
       activationTokenExpires: new Date(Date.now() + 3600000), // 1 hour future
       save: vi.fn(),
+      getSignedJwtToken: vi.fn().mockReturnValue("valid-token"),
       toObject: function() { 
         // Return a plain object representation
         return { 

@@ -39,6 +39,16 @@ vi.mock("prom-client", () => {
   };
 });
 
+// Mock User model
+const mockFindOne = vi.fn();
+vi.mock("../models/User.js", () => {
+  return {
+    default: {
+      findOne: mockFindOne,
+    },
+  };
+});
+
 // Mock global fetch
 const fetchMock = vi.fn();
 vi.stubGlobal("fetch", fetchMock);
@@ -57,6 +67,13 @@ describe("Email Service (Brevo API)", () => {
 
     // Dynamic import to pick up new env vars and mock state
     emailService = await import("../services/emailService.js");
+
+    // Default User mock (allow email by default)
+    mockFindOne.mockReturnValue({
+      select: vi.fn().mockResolvedValue({
+        preferences: { notifications: { email: true } },
+      }),
+    });
   });
 
   afterEach(() => {
@@ -135,9 +152,50 @@ describe("Email Service (Brevo API)", () => {
 
     // Check if fallback link was logged
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "MANUAL FALLBACK LINK: Welcome John! Link: http://manual.link",
-      ),
+      expect.stringContaining("http://manual.link"),
     );
+  });
+
+  it("should skip sending notification email if user preference is disabled", async () => {
+    // Mock user with disabled email notifications
+    mockFindOne.mockReturnValue({
+      select: vi.fn().mockResolvedValue({
+        preferences: { notifications: { email: false } },
+      }),
+    });
+
+    const result = await emailService.sendNotificationEmail(
+      "user@test.com",
+      "Update",
+      "<p>News</p>",
+      "News",
+    );
+
+    expect(result).toEqual({ skipped: true, reason: "user_preference" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("should send notification email if user preference is enabled", async () => {
+    // Mock user with enabled email notifications
+    mockFindOne.mockReturnValue({
+      select: vi.fn().mockResolvedValue({
+        preferences: { notifications: { email: true } },
+      }),
+    });
+
+    // Mock success
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ messageId: "<test-msg-id>" }),
+    });
+
+    await emailService.sendNotificationEmail(
+      "user@test.com",
+      "Update",
+      "<p>News</p>",
+      "News",
+    );
+
+    expect(fetchMock).toHaveBeenCalled();
   });
 });

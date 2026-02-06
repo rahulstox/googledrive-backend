@@ -5,6 +5,8 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { rateLimit } from "express-rate-limit";
 import passport from "passport";
+import speakeasy from "speakeasy";
+import qrcode from "qrcode";
 import User from "../models/User.js";
 import File from "../models/File.js";
 import PasswordResetToken from "../models/PasswordResetToken.js";
@@ -58,6 +60,14 @@ const resendLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const activationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // Limit each IP to 10 activation attempts
+  message: { message: "Too many activation attempts, please try again later." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 router.post(
   "/register",
   [
@@ -69,12 +79,15 @@ router.post(
       .normalizeEmail(),
     body("password")
       .isLength({ min: 8 })
-      .withMessage("Password must be at least 8 characters")
-      .matches(
-        /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
-      )
+      .withMessage("Password must be at least 8 characters"),
+    body("username")
+      .optional()
+      .trim()
+      .isLength({ min: 3 })
+      .withMessage("Username must be at least 3 characters")
+      .matches(/^[A-Za-z0-9_-]+$/)
       .withMessage(
-        "Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character",
+        "Username can only contain letters, numbers, underscores, and hyphens",
       ),
   ],
   validate,
@@ -82,52 +95,122 @@ router.post(
     const requestId =
       req.headers["x-request-id"] ||
       `req-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    console.log(
-      `[Register][${requestId}] Request received for email: ${req.body.email}`,
-    );
-    console.time(`[Register][${requestId}] Total Duration`);
+    // console.log(
+    //   `[Register][${requestId}] Request received for email: ${req.body.email}`,
+    // );
+    // console.time(`[Register][${requestId}] Total Duration`);
 
     // Start metrics timer
     const endTimer = registrationDuration.startTimer();
 
     try {
-      const { email, password } = req.body;
-      const firstName = req.body.firstName || "User";
-      const lastName = req.body.lastName || "";
+      let { email, password, username } = req.body;
 
-      console.log(`[Register][${requestId}] Validating input...`);
-      const existing = await User.findOne({ email });
-      if (existing) {
-        console.log(`[Register][${requestId}] User already exists: ${email}`);
-        console.timeEnd(`[Register][${requestId}] Total Duration`);
-        registrationTotal.inc({ status: "failed_exists" });
-        return res
-          .status(400)
-          .json({ message: "An account with this email already exists." });
+      // Auto-generate username if not provided
+      if (!username) {
+        const base = email.split("@")[0].replace(/[^a-zA-Z0-9]/g, "");
+        const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+        username = `${base.substring(0, 15)}${randomSuffix}`;
       }
 
-      console.log(`[Register][${requestId}] Generating activation token...`);
-      // Create JWT activation token
-      const activationToken = jwt.sign(
-        { email },
-        process.env.JWT_SECRET || "secret",
-        { expiresIn: "10m" },
+      // console.log(`[Register][${requestId}] Validating input...`);
+      const existing = await User.findOne({ email }).select(
+        "+isActive +activationToken +activationTokenExpires",
       );
+
+      if (existing) {
+        if (existing.isActive) {
+          // console.log(
+          //   `[Register][${requestId}] Active user already exists: ${email}`,
+          // );
+          // console.timeEnd(`[Register][${requestId}] Total Duration`);
+          registrationTotal.inc({ status: "failed_exists" });
+          return res
+            .status(400)
+            .json({ message: "An account with this email already exists." });
+        }
+
+        // Handle unactivated account: Resend activation email
+        // console.log(
+        //   `[Register][${requestId}] Unactivated user exists. Checking token validity...`,
+        // );
+
+        let activationToken = existing.activationToken;
+        let activationTokenExpires = existing.activationTokenExpires;
+
+        // Reuse existing token if it has at least 2 minutes of validity left
+        // This prevents race conditions where a user clicks a "stale" link from a previous email
+        if (
+          !activationToken ||
+          !activationTokenExpires ||
+          activationTokenExpires < Date.now() + 2 * 60 * 1000
+        ) {
+          // console.log(
+          //   `[Register][${requestId}] Token expired or missing. Generating new one...`,
+          // );
+          activationToken = jwt.sign({ email }, process.env.JWT_SECRET, {
+            expiresIn: "10m",
+          });
+          activationTokenExpires = new Date(Date.now() + 10 * 60 * 1000);
+          existing.activationToken = activationToken;
+          existing.activationTokenExpires = activationTokenExpires;
+          await existing.save();
+        } else {
+          // console.log(
+          //   `[Register][${requestId}] Existing token is valid. Reusing...`,
+          // );
+        }
+
+        const baseUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+        const activationLink = `${baseUrl}/activate?token=${activationToken}`;
+
+        // Fire-and-forget email
+        sendActivationEmail(email, existing.username || "User", activationLink)
+          .then(() => {
+            // console.log(`[Register][${requestId}] Re-activation email sent.`);
+            emailSendTotal.inc({ status: "resend_success" });
+          })
+          .catch((err) => {
+            console.error(
+              `[Register][${requestId}] Email failed:`,
+              err.message,
+            );
+            emailSendTotal.inc({ status: "resend_failed" });
+          });
+
+        const payload = {
+          message:
+            "Account created. Please check your email to activate your account.",
+          userId: existing._id,
+        };
+        if (process.env.NODE_ENV !== "production") {
+          payload.activationLink = activationLink;
+        }
+
+        // console.timeEnd(`[Register][${requestId}] Total Duration`);
+        registrationTotal.inc({ status: "resend_success" });
+        return res.status(200).json(payload);
+      }
+
+      // console.log(`[Register][${requestId}] Generating activation token...`);
+      // Create JWT activation token
+      const activationToken = jwt.sign({ email }, process.env.JWT_SECRET, {
+        expiresIn: "10m",
+      });
       const activationTokenExpires = new Date(Date.now() + 10 * 60 * 1000);
 
-      console.log(`[Register][${requestId}] Creating user in DB...`);
-      console.time(`[Register][${requestId}] DB Create`);
+      // console.log(`[Register][${requestId}] Creating user in DB...`);
+      // console.time(`[Register][${requestId}] DB Create`);
       const user = await User.create({
         email,
-        firstName,
-        lastName,
         password,
+        username,
         isActive: false,
         activationToken,
         activationTokenExpires,
       });
-      console.timeEnd(`[Register][${requestId}] DB Create`);
-      console.log(`[Register][${requestId}] User created with ID: ${user._id}`);
+      // console.timeEnd(`[Register][${requestId}] DB Create`);
+      // console.log(`[Register][${requestId}] User created with ID: ${user._id}`);
 
       const baseUrl = process.env.FRONTEND_URL || "http://localhost:5173";
       if (!baseUrl.startsWith("http")) {
@@ -137,12 +220,14 @@ router.post(
       }
       const activationLink = `${baseUrl}/activate?token=${activationToken}`;
 
-      console.log(`[Register][${requestId}] Sending activation email (Background)...`);
-      
+      // console.log(
+      //   `[Register][${requestId}] Sending activation email (Background)...`,
+      // );
+
       // Fire-and-forget email sending
-      sendActivationEmail(email, firstName, activationLink)
+      sendActivationEmail(email, "User", activationLink)
         .then(() => {
-          console.log(`[Register][${requestId}] Email sent successfully.`);
+          // console.log(`[Register][${requestId}] Email sent successfully.`);
           emailSendTotal.inc({ status: "success" });
         })
         .catch((emailErr) => {
@@ -151,7 +236,7 @@ router.post(
             emailErr.message,
           );
           // Log the link so admin can manually activate if needed
-          console.log(
+          console.error(
             `[Register][${requestId}] MANUAL ACTIVATION LINK: ${activationLink}`,
           );
           emailSendTotal.inc({ status: "failed" });
@@ -167,7 +252,7 @@ router.post(
       if (process.env.NODE_ENV !== "production") {
         payload.activationLink = activationLink;
       }
-      console.timeEnd(`[Register][${requestId}] Total Duration`);
+      // console.timeEnd(`[Register][${requestId}] Total Duration`);
 
       // End metrics timer and increment success
       endTimer();
@@ -176,7 +261,7 @@ router.post(
       res.status(201).json(payload);
     } catch (err) {
       console.error(`[Register][${requestId}] Error:`, err.message);
-      console.timeEnd(`[Register][${requestId}] Total Duration`);
+      // console.timeEnd(`[Register][${requestId}] Total Duration`);
       registrationTotal.inc({ status: "error" });
 
       if (err.code === 11000) {
@@ -192,7 +277,7 @@ router.post(
   },
 );
 
-router.get("/activate", async (req, res) => {
+router.get("/activate", activationLimiter, async (req, res) => {
   try {
     const token = req.query.token;
     if (!token) {
@@ -202,7 +287,7 @@ router.get("/activate", async (req, res) => {
     // Verify JWT
     let decoded;
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET || "secret");
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
     } catch (e) {
       return res
         .status(400)
@@ -239,7 +324,26 @@ router.get("/activate", async (req, res) => {
 
     activationTotal.inc({ status: "success" });
 
-    res.status(200).json({ message: "Account activated successfully." });
+    // Auto-login logic
+    const tokenPayload = user.getSignedJwtToken();
+
+    res.cookie("token", tokenPayload, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    res.status(200).json({
+      message: "Account activated successfully.",
+      token: tokenPayload,
+      user: {
+        id: user._id,
+        email: user.email,
+        username: user.username,
+        authProvider: user.authProvider,
+      },
+    });
   } catch (err) {
     console.error("[Activate] Error:", err.message);
     activationTotal.inc({ status: "error" });
@@ -273,20 +377,28 @@ router.post(
         return res.status(200).json({ message: "Account already active." });
       }
 
-      // Generate new token
-      const activationToken = jwt.sign(
-        { email },
-        process.env.JWT_SECRET || "secret",
-        { expiresIn: "10m" },
-      );
-      user.activationToken = activationToken;
-      user.activationTokenExpires = new Date(Date.now() + 10 * 60 * 1000);
-      await user.save();
+      let activationToken = user.activationToken;
+      let activationTokenExpires = user.activationTokenExpires;
+
+      // Reuse existing token if valid (> 2 mins remaining)
+      if (
+        !activationToken ||
+        !activationTokenExpires ||
+        activationTokenExpires < Date.now() + 2 * 60 * 1000
+      ) {
+        activationToken = jwt.sign({ email }, process.env.JWT_SECRET, {
+          expiresIn: "10m",
+        });
+        activationTokenExpires = new Date(Date.now() + 10 * 60 * 1000);
+        user.activationToken = activationToken;
+        user.activationTokenExpires = activationTokenExpires;
+        await user.save();
+      }
 
       const baseUrl = process.env.FRONTEND_URL || "http://localhost:5173";
       const activationLink = `${baseUrl}/activate?token=${activationToken}`;
 
-      await sendActivationEmail(user.email, user.firstName, activationLink);
+      await sendActivationEmail(user.email, "User", activationLink);
       emailSendTotal.inc({ status: "resend_success" });
 
       res.status(200).json({ message: "Activation email sent." });
@@ -311,9 +423,9 @@ router.post(
   async (req, res) => {
     const endTimer = loginDuration.startTimer();
     try {
-      const { email, password } = req.body;
+      const { email, password, otp } = req.body;
       const user = await User.findOne({ email }).select(
-        "+password +tokenVersion",
+        "+password +tokenVersion +twoFactorEnabled +twoFactorSecret",
       );
 
       if (!user || !(await user.comparePassword(password))) {
@@ -326,7 +438,43 @@ router.post(
           .json({ message: "Account not activated. Please check your email." });
       }
 
+      // 2FA Verification
+      if (user.twoFactorEnabled) {
+        if (!otp) {
+          return res.status(403).json({
+            message: "2FA token required",
+            require2fa: true,
+          });
+        }
+        const verified = speakeasy.totp.verify({
+          secret: user.twoFactorSecret,
+          encoding: "base32",
+          token: otp,
+        });
+        if (!verified) {
+          return res.status(401).json({
+            message: "Invalid 2FA token",
+            require2fa: true,
+          });
+        }
+      }
+
       const token = user.getSignedJwtToken();
+
+      // Track login history
+      const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+      const device = req.headers["user-agent"] || "Unknown";
+
+      // Limit history to last 10 entries
+      if (user.loginHistory.length >= 10) {
+        user.loginHistory.shift();
+      }
+      user.loginHistory.push({
+        ip,
+        device,
+        timestamp: new Date(),
+      });
+      await user.save({ validateBeforeSave: false });
 
       // Pre-warm cache to speed up subsequent requests
       try {
@@ -353,9 +501,9 @@ router.post(
         user: {
           id: user._id,
           email: user.email,
-          firstName: user.firstName,
-          lastName: user.lastName,
+          username: user.username,
           authProvider: user.authProvider,
+          twoFactorEnabled: user.twoFactorEnabled,
         },
       });
       endTimer();
@@ -372,19 +520,80 @@ router.get("/me", protect, async (req, res) => {
   res.json({ user: req.user });
 });
 
+// Check Username Availability
+router.get("/check-username", async (req, res) => {
+  try {
+    const { u } = req.query;
+    if (!u) return res.status(400).json({ message: "Username is required" });
+
+    // Only check if valid format
+    if (!/^[A-Za-z0-9_-]{3,20}$/.test(u)) {
+      return res.status(400).json({ message: "Invalid format" });
+    }
+
+    const exists = await User.exists({ username: u });
+    res.json({ exists: !!exists });
+  } catch (err) {
+    console.error("[CheckUsername] Error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 // Update Current User
 router.put(
   "/me",
   protect,
-  [body("firstName").optional().trim(), body("lastName").optional().trim()],
+  [
+    body("username")
+      .optional()
+      .trim()
+      .matches(/^[A-Za-z0-9_-]{3,20}$/)
+      .withMessage(
+        "Username must be 3-20 characters and can only contain letters, numbers, underscores, and hyphens",
+      ),
+    body("bio")
+      .optional()
+      .trim()
+      .isLength({ max: 500 })
+      .withMessage("Bio cannot exceed 500 characters"),
+    body("phoneNumber").optional().trim(),
+  ],
   validate,
   async (req, res) => {
     try {
-      const { firstName, lastName } = req.body;
+      const { username, bio, phoneNumber, preferences, avatarUrl } = req.body;
       const user = req.user;
 
-      if (firstName !== undefined) user.firstName = firstName;
-      if (lastName !== undefined) user.lastName = lastName;
+      if (username) {
+        // Check uniqueness if changing
+        if (user.username !== username) {
+          const exists = await User.exists({ username });
+          if (exists) {
+            return res.status(400).json({ message: "Username already taken" });
+          }
+          user.username = username;
+        }
+      }
+
+      if (bio !== undefined) user.bio = bio;
+      if (phoneNumber !== undefined) user.phoneNumber = phoneNumber;
+      if (avatarUrl !== undefined) user.avatarUrl = avatarUrl;
+
+      if (preferences) {
+        // Merge preferences
+        user.preferences = {
+          ...user.preferences,
+          ...preferences,
+          notifications: {
+            ...user.preferences.notifications,
+            ...(preferences.notifications || {}),
+          },
+          privacy: {
+            ...user.preferences.privacy,
+            ...(preferences.privacy || {}),
+          },
+        };
+      }
 
       await user.save();
 
@@ -398,8 +607,7 @@ router.put(
         user: {
           id: user._id,
           email: user.email,
-          firstName: user.firstName,
-          lastName: user.lastName,
+          username: user.username,
           authProvider: user.authProvider,
         },
       });
@@ -409,6 +617,75 @@ router.put(
     }
   },
 );
+
+// Change Password
+router.put(
+  "/password",
+  protect,
+  [
+    body("currentPassword")
+      .notEmpty()
+      .withMessage("Current password is required"),
+    body("newPassword")
+      .isLength({ min: 8 })
+      .withMessage("New password must be at least 8 characters"),
+  ],
+  validate,
+  async (req, res) => {
+    try {
+      const { currentPassword, newPassword } = req.body;
+
+      // Get user with password selected
+      const user = await User.findById(req.user.id).select("+password");
+
+      if (!user.password) {
+        return res.status(400).json({
+          message:
+            "You are logged in via social provider. Please set a password using forgot password flow.",
+        });
+      }
+
+      const isMatch = await user.comparePassword(currentPassword);
+      if (!isMatch) {
+        return res.status(401).json({ message: "Incorrect current password" });
+      }
+
+      user.password = newPassword;
+      await user.save();
+
+      res.json({ message: "Password updated successfully" });
+    } catch (err) {
+      console.error("[ChangePassword] Error:", err);
+      res.status(500).json({ message: "Failed to update password" });
+    }
+  },
+);
+
+// Get Login History
+router.get("/history", protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("loginHistory");
+    res.json({ history: user.loginHistory });
+  } catch (err) {
+    console.error("[GetHistory] Error:", err);
+    res.status(500).json({ message: "Failed to fetch history" });
+  }
+});
+
+// Get Active Sessions (Mock for now, or based on token logic if using DB sessions)
+// Since we use stateless JWT, we can't list all sessions easily without DB tracking.
+// We'll return the current session and maybe the history as "sessions".
+router.get("/sessions", protect, async (req, res) => {
+  // Return last 5 login history entries as "active sessions" for display purposes
+  // In a real JWT system, you'd need a whitelist/blacklist table to track active tokens.
+  // For now, we'll just show login history as "Recent Activity".
+  try {
+    const user = await User.findById(req.user.id).select("loginHistory");
+    res.json({ sessions: user.loginHistory.slice(0, 5) });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch sessions" });
+  }
+});
 
 router.post("/logout", (req, res) => {
   res.clearCookie("token");
@@ -509,7 +786,7 @@ router.post(
       );
 
       // Send email (async, don't await to block response, but catch errors)
-      sendPasswordResetEmail(user.email, user.firstName, resetLink).catch(
+      sendPasswordResetEmail(user.email, user.username, resetLink).catch(
         (err) => console.error("[Forgot Password] Email failed:", err),
       );
 
@@ -626,7 +903,7 @@ router.post(
       session.endSession();
 
       // Send confirmation email (fire and forget)
-      sendPasswordChangedEmail(user.email, user.firstName, {
+      sendPasswordChangedEmail(user.email, user.username, {
         time: new Date().toLocaleString(),
         ip: req.ip,
         userAgent: req.get("User-Agent"),
@@ -708,7 +985,7 @@ router.delete("/me", authenticate, async (req, res) => {
     );
 
     // 4. Send Email (Fire-and-forget)
-    sendAccountDeletionEmail(user.email, user.firstName).catch((err) =>
+    sendAccountDeletionEmail(user.email, user.username).catch((err) =>
       console.error(
         `${logPrefix} Failed to send email (non-critical):`,
         err.message,
@@ -726,6 +1003,75 @@ router.delete("/me", authenticate, async (req, res) => {
     res.status(500).json({ message: "Failed to delete account." });
   } finally {
     await session.endSession();
+  }
+});
+
+// --- 2FA Endpoints ---
+
+router.post("/2fa/generate", protect, async (req, res) => {
+  try {
+    const secret = speakeasy.generateSecret({
+      name: `Krypton Drive (${req.user.email})`,
+    });
+    // Save secret temporarily (or permanently but disabled)
+    req.user.twoFactorSecret = secret.base32;
+    await req.user.save();
+
+    const url = await qrcode.toDataURL(secret.otpauth_url);
+    res.json({ secret: secret.base32, qrCode: url });
+  } catch (err) {
+    console.error("[2FA Generate] Error:", err);
+    res.status(500).json({ message: "Failed to generate 2FA secret" });
+  }
+});
+
+router.post("/2fa/verify", protect, async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ message: "Token required" });
+
+    const user = await User.findById(req.user.id).select("+twoFactorSecret");
+    if (!user.twoFactorSecret) {
+      return res.status(400).json({ message: "2FA setup not initiated" });
+    }
+
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: "base32",
+      token: token,
+    });
+
+    if (verified) {
+      user.twoFactorEnabled = true;
+      await user.save();
+      res.json({ message: "2FA enabled successfully" });
+    } else {
+      res.status(400).json({ message: "Invalid 2FA code" });
+    }
+  } catch (err) {
+    console.error("[2FA Verify] Error:", err);
+    res.status(500).json({ message: "Failed to verify 2FA" });
+  }
+});
+
+router.post("/2fa/disable", protect, async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password)
+      return res.status(400).json({ message: "Password required" });
+
+    const user = await User.findById(req.user.id).select("+password");
+    if (!(await user.comparePassword(password))) {
+      return res.status(401).json({ message: "Incorrect password" });
+    }
+
+    user.twoFactorEnabled = false;
+    user.twoFactorSecret = undefined;
+    await user.save();
+    res.json({ message: "2FA disabled successfully" });
+  } catch (err) {
+    console.error("[2FA Disable] Error:", err);
+    res.status(500).json({ message: "Failed to disable 2FA" });
   }
 });
 

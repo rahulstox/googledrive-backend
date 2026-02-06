@@ -29,11 +29,11 @@ export const authenticate = async (req, res, next) => {
     const cachedUser = await cache.get(cacheKey);
 
     if (cachedUser) {
-      console.log(`[Auth] Cache HIT for ${cacheKey}`);
+      // console.log(`[Auth] Cache HIT for ${cacheKey}`);
       const userObj = JSON.parse(cachedUser);
       // Verify token version matches cached version
       if (userObj.tokenVersion && decoded.v !== userObj.tokenVersion) {
-        console.log(`[Auth] Token version mismatch for ${cacheKey}`);
+        // console.log(`[Auth] Token version mismatch for ${cacheKey}`);
         // Token version mismatch (cached user is newer/older than token?).
         // If token is old (v=1) and cache is new (v=2), reject.
         // If cache is old (v=1) and token is new (v=2), we should fetch DB.
@@ -43,27 +43,27 @@ export const authenticate = async (req, res, next) => {
       } else if (userObj.isActive === false) {
         // If user is inactive in cache, verify with DB to prevent stale cache issues
         // (e.g. user just activated but cache wasn't updated)
-        console.log(`[Auth] Cached user is inactive. Verifying with DB...`);
+        // console.log(`[Auth] Cached user is inactive. Verifying with DB...`);
         user = null;
       } else {
         user = User.hydrate(userObj);
-        console.log(
-          `[Auth] User hydrated from cache. isActive: ${user.isActive}`,
-        );
+        // console.log(
+        //   `[Auth] User hydrated from cache. isActive: ${user.isActive}`,
+        // );
       }
     } else {
-      console.log(`[Auth] Cache MISS for ${cacheKey}`);
+      // console.log(`[Auth] Cache MISS for ${cacheKey}`);
     }
 
     if (!user) {
       user = await User.findById(decoded.id).select("+tokenVersion");
       if (user) {
-        console.log(`[Auth] User fetched from DB. isActive: ${user.isActive}`);
+        // console.log(`[Auth] User fetched from DB. isActive: ${user.isActive}`);
         // Cache the user object (lean)
         // We need to ensure virtuals or necessary fields are present.
         // toObject() gives plain JSON.
         await cache.set(cacheKey, JSON.stringify(user.toObject()));
-        console.log(`[Auth] User cached for ${cacheKey}`);
+        // console.log(`[Auth] User cached for ${cacheKey}`);
       }
     }
 
@@ -94,6 +94,17 @@ export const requireActive = (req, res, next) => {
       .json({ message: "Account not activated. Please check your email." });
   }
   next();
+};
+
+export const authorize = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user.role || !roles.includes(req.user.role)) {
+      return res.status(403).json({
+        message: "You do not have permission to perform this action",
+      });
+    }
+    next();
+  };
 };
 
 // Combine for backward compatibility and standard protection

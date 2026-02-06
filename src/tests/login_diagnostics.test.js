@@ -32,16 +32,14 @@ describe("Login Diagnostics", () => {
   const activeUser = {
     email: "active.login@test.com",
     password: "Password123!",
-    firstName: "Active",
-    lastName: "User",
+    username: "activeuser",
     isActive: true,
   };
 
   const inactiveUser = {
     email: "inactive.login@test.com",
     password: "Password123!",
-    firstName: "Inactive",
-    lastName: "User",
+    username: "inactiveuser",
     isActive: false,
   };
 
@@ -73,7 +71,7 @@ describe("Login Diagnostics", () => {
     expect(res.body.token).toBeDefined();
     expect(res.body.user).toBeDefined();
     expect(res.body.user.email).toBe(activeUser.email);
-    expect(res.body.user.firstName).toBe(activeUser.firstName);
+    expect(res.body.user.username).toBe(activeUser.username);
     // Ensure no sensitive data
     expect(res.body.user.password).toBeUndefined();
   });

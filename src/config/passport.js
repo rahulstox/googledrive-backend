@@ -18,7 +18,10 @@ const setupPassport = () => {
           try {
             // Check if user exists
             let user = await User.findOne({
-              $or: [{ googleId: profile.id }, { email: profile.emails[0].value }],
+              $or: [
+                { googleId: profile.id },
+                { email: profile.emails[0].value },
+              ],
             });
 
             if (user) {
@@ -26,10 +29,6 @@ const setupPassport = () => {
               if (!user.googleId) {
                 user.googleId = profile.id;
                 user.authProvider = "google"; // Update primary provider or keep email?
-                if (!user.firstName || user.firstName === "User") {
-                  user.firstName = profile.name?.givenName || "User";
-                  user.lastName = profile.name?.familyName || "";
-                }
                 await user.save();
               }
               return done(null, user);
@@ -37,8 +36,6 @@ const setupPassport = () => {
 
             // Create new user
             user = await User.create({
-              firstName: profile.name?.givenName || "User",
-              lastName: profile.name?.familyName || "",
               email: profile.emails[0].value,
               googleId: profile.id,
               authProvider: "google",
@@ -50,11 +47,13 @@ const setupPassport = () => {
             console.error("Google Auth Error:", err);
             done(err, null);
           }
-        }
-      )
+        },
+      ),
     );
   } else {
-    console.warn("Skipping Google OAuth setup - Missing GOOGLE_CLIENT_ID/SECRET");
+    console.warn(
+      "Skipping Google OAuth setup - Missing GOOGLE_CLIENT_ID/SECRET",
+    );
   }
 
   // GitHub Strategy
@@ -70,9 +69,9 @@ const setupPassport = () => {
         async (accessToken, refreshToken, profile, done) => {
           try {
             const email = profile.emails?.[0]?.value || null;
-            
+
             if (!email) {
-               return done(new Error("No email found in GitHub profile"), null);
+              return done(new Error("No email found in GitHub profile"), null);
             }
 
             let user = await User.findOne({
@@ -87,14 +86,10 @@ const setupPassport = () => {
               return done(null, user);
             }
 
-            // Parse name
-            const nameParts = (profile.displayName || profile.username || "User").split(" ");
-            const firstName = nameParts[0];
-            const lastName = nameParts.slice(1).join(" ") || "";
+            // Parse name (Optional: Use profile.username as default username if available?)
+            // For now, we leave username empty to let user set it up
 
             user = await User.create({
-              firstName,
-              lastName,
               email: email,
               githubId: profile.id,
               authProvider: "github",
@@ -106,11 +101,13 @@ const setupPassport = () => {
             console.error("GitHub Auth Error:", err);
             done(err, null);
           }
-        }
-      )
+        },
+      ),
     );
   } else {
-    console.warn("Skipping GitHub OAuth setup - Missing GITHUB_CLIENT_ID/SECRET");
+    console.warn(
+      "Skipping GitHub OAuth setup - Missing GITHUB_CLIENT_ID/SECRET",
+    );
   }
 
   // Serialization (Not needed for session: false, but good practice if sessions enabled later)

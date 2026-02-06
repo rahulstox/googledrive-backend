@@ -34,19 +34,18 @@ describe("Activation Bug Reproduction", () => {
     _id: new mongoose.Types.ObjectId(),
     email: "bugcheck@example.com",
     password: "hashedpassword",
-    firstName: "Bug",
-    lastName: "Check",
+    username: "bugcheck",
     isActive: false, // Start inactive
     activationToken: "valid-token",
     activationTokenExpires: new Date(Date.now() + 3600000),
+    loginHistory: [],
     comparePassword: vi.fn().mockResolvedValue(true),
     getSignedJwtToken: vi.fn().mockReturnValue("valid-jwt-token"),
     toObject: function () {
       return {
         _id: this._id,
         email: this.email,
-        firstName: this.firstName,
-        lastName: this.lastName,
+        username: this.username,
         isActive: this.isActive,
         authProvider: "email",
       };

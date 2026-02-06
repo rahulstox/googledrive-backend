@@ -39,11 +39,13 @@ describe("Inactive User Login Prevention", () => {
       isActive: false, // Inactive
       comparePassword: vi.fn().mockResolvedValue(true),
       getSignedJwtToken: vi.fn().mockReturnValue("valid-token"),
-      toObject: function() { return this; }
+      toObject: function () {
+        return this;
+      },
     };
 
     User.findOne = vi.fn().mockImplementation(() => ({
-      select: vi.fn().mockResolvedValue(mockUser)
+      select: vi.fn().mockResolvedValue(mockUser),
     }));
 
     const res = await request(app)
@@ -59,14 +61,19 @@ describe("Inactive User Login Prevention", () => {
       _id: "user123",
       email: "active@example.com",
       password: "hashedPassword",
+      username: "activeuser",
       isActive: true, // Active
+      loginHistory: [],
       comparePassword: vi.fn().mockResolvedValue(true),
       getSignedJwtToken: vi.fn().mockReturnValue("valid-token"),
-      toObject: function() { return this; }
+      save: vi.fn().mockResolvedValue(true),
+      toObject: function () {
+        return this;
+      },
     };
 
     User.findOne = vi.fn().mockImplementation(() => ({
-      select: vi.fn().mockResolvedValue(mockUser)
+      select: vi.fn().mockResolvedValue(mockUser),
     }));
 
     const res = await request(app)

@@ -8,12 +8,14 @@ import User from "../models/User.js";
 import { vi } from "vitest";
 vi.mock("../models/User.js", () => ({
   default: {
-    findOne: vi.fn(),
+    findOne: vi.fn().mockImplementation(() => ({
+      select: vi.fn().mockResolvedValue(null), // Default to not found
+    })),
     create: vi.fn(),
   },
 }));
 vi.mock("../services/emailService.js", () => ({
-  sendActivationEmail: vi.fn(),
+  sendActivationEmail: vi.fn().mockResolvedValue(true),
 }));
 vi.mock("../services/metrics.js", () => ({
   registrationTotal: { inc: vi.fn() },
@@ -25,6 +27,8 @@ vi.mock("../services/metrics.js", () => ({
 const app = express();
 app.use(express.json());
 app.use("/api/auth", authRoutes);
+
+process.env.JWT_SECRET = "test-secret"; // Ensure JWT_SECRET is set for tests
 
 describe("Email Validation Logic", () => {
   const validEmails = [
@@ -74,8 +78,7 @@ describe("Email Validation Logic", () => {
       const res = await request(app).post("/api/auth/register").send({
         email,
         password: "Password123!",
-        firstName: "Test",
-        lastName: "User",
+        username: "testuser",
       });
       if (res.status === 400) {
         console.log(`Failed valid email: ${email}`, res.body);
@@ -93,8 +96,7 @@ describe("Email Validation Logic", () => {
       const res = await request(app).post("/api/auth/register").send({
         email,
         password: "Password123!",
-        firstName: "Test",
-        lastName: "User",
+        username: "testuser",
       });
       if (res.status !== 400) {
         console.log(`Accepted invalid email: ${email}`, res.status);
